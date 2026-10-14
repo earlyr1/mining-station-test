@@ -44,7 +44,7 @@ make reset            # удалить оба тома и поднять сте�
   сохранённом состоянии — только `make reset`. Иначе `dispatcher` отказывается стартовать, и `make up` печатает
   причину (`start_refused`).
 - Перехват standby: `docker compose --profile standby up -d dispatcher-b`, затем `docker compose stop dispatcher` —
-  через 10,6–12,3 с партицию забирает `dispatcher-b`; после `docker compose start dispatcher` она возвращается.
+  через 10,0–12,3 с партицию забирает `dispatcher-b`; после `docker compose start dispatcher` она возвращается.
 - `make e2e` и `make e2e-chaos` начинают с `make reset` — тома стираются.
 
 Без make — то же, что `make up`:
@@ -62,7 +62,7 @@ mkdir -p out && VQ_UID=$(id -u) VQ_GID=$(id -g) docker compose --profile demo up
 | Команда | Что проверяет | Последний прогон |
 |---|---|---|
 | `make test` | правила ТЗ и всё, что проверяется без брокера и БД | 766 тестов, ~54 с |
-| `make test-integration` | хранилище на настоящем Postgres (testcontainers, нужен Docker) | 18 тестов, ~5,5 с |
+| `make test-integration` | хранилище на настоящем Postgres (testcontainers, нужен Docker) | 18 тестов, ~5,7 с |
 | `make e2e` | сквозной прогон на стенде с нуля, затем `verify` | PASS, 3,5–4 мин |
 | `make e2e-chaos` | то же плюс две аварии `dispatcher` | PASS, 3,5–4 мин |
 | `make verify` | сверка лога с офлайн-прогоном ядра на поднятом стенде | 0 расхождений, ~17 с |
@@ -111,7 +111,7 @@ PASS/FAIL, итог — в `out/e2e.json`. Последний прогон: от
 После точки аварии её пачка уходит повторно — 1–3 записи `queue.v1`, все байт в байт; после `kill` повторов в
 прогонах не было.
 
-Вручную на демо-стенде: standby после штатной остановки активного забирает партицию через 10,6–12,3 с
+Вручную на демо-стенде: standby после штатной остановки активного забирает партицию через 10,0–12,3 с
 (`session.timeout.ms` 10 с: static-участник не шлёт LeaveGroup); перезапущенный контейнер получает её сразу.
 
 **`make verify`** — `vq-verify` в образе приложения: берёт N = `processor.next_offset`, прогоняет
@@ -282,7 +282,7 @@ PASS/FAIL, итог — в `out/e2e.json`. Последний прогон: от
   Python и libm зависит последний бит гаверсинуса, поэтому `make verify` и `make bench` идут в образе приложения.
 - **Брокер — одна нода Redpanda в режиме dev-container (RF=1, без fsync).** Потеря ноды — потеря данных; в
   продакшене RF=3, `acks=all`, `min.insync.replicas=2`.
-- **Standby после штатной остановки** забирает партицию только через `session.timeout.ms` (10,6–12,3 с):
+- **Standby после штатной остановки** забирает партицию только через `session.timeout.ms` (10,0–12,3 с):
   static-участник не шлёт LeaveGroup.
 - **Один `group.instance.id` у двух процессов** — они вытесняют друг друга по кругу; поэтому у standby свой id, а
   `dispatcher`, запущенный с хоста рядом со стендом, обязан задать свой `VQ_GROUP_INSTANCE_ID`.
