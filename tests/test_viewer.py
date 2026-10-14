@@ -229,6 +229,20 @@ def queue_bytes(station: str, at: int, wait: str) -> bytes:
     ).encode()
 
 
+def nested(depth: int) -> str:
+    """JSON-массив вложенности depth — строкой: json.dumps на такой глубине сам упал бы в RecursionError."""
+    return "[" * depth + "]" * depth
+
+
+def record_with(topic: str, value: str, at: int = NOON + 1) -> bytes:
+    """Запись topic, где значение (текст JSON) стоит в неконтрактном месте: wait_seconds строки очереди S1 или
+    лишний ключ решения T2."""
+    if topic == QUEUE:
+        return queue_bytes("S1", at, value)
+    head = f'{{"unit_uuid":"T2","at":"{fmt_ts(at)}","result":"rejected","reason":"no_gain"'
+    return f'{head},"extra":{value}}}'.encode()
+
+
 @pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
 def test_non_finite_number_in_a_record_does_not_break_the_page(bad):
     """json.loads пропускает NaN, Infinity и 1e999 (→ inf), а JSONResponse (allow_nan=False) их не сериализует:
@@ -251,6 +265,47 @@ def test_invalid_json_and_deep_nesting_are_malformed():
     d = c.data()
     assert d.malformed == 3 and [x.unit for x in d.decisions] == ["T1"] and d.queues == {}
     assert d.max_src_offset == {DECISION: 6}
+
+
+@pytest.mark.parametrize("topic", [QUEUE, DECISION])
+def test_deep_nesting_below_the_json_limit_is_malformed_and_the_page_stays_up(topic):
+    """§5.1: глубокая вложенность — запись не той формы. json.loads (C) разбирает около 10 000 уровней, а json_safe
+    рекурсивен в Python и падает на 1 000: запись в 2 000 уровней (лишний ключ решения, поле строки очереди) при
+    malformed=0 превращала бы каждый /api/state в 500, пока её не вытеснят новые записи."""
+    f = Feed()
+    f.q(1, "S1", NOON, ["T1"])
+    f.d(1, "T1", NOON)
+    f.raw(topic, record_with(topic, nested(2_000)), 2)
+    d = f.cache.data()
+    # запись не той формы ничего не меняет: последние хорошие очередь и решение на месте, отметка offset прежняя
+    assert d.malformed == 1 and d.queues["S1"].src_offset == 1 and [x.unit for x in d.decisions] == ["T1"]
+    assert d.max_src_offset == {QUEUE: 1, DECISION: 1} and d.decision_totals == {"no_gain": 1}
+    app = va.create_app(two_stations(), FakeSources(vs.SourceSnapshots(kafka=ok(d), pg=pg_snapshot())), lambda: WALL)
+    status, _, body = asyncio.run(asgi_get(app, "/api/state"))
+    assert status == 200 and json.loads(body)["health"]["stream"]["malformed"] == 1
+
+
+def at_depth(topic: str, total: int, at: int = NOON + 1) -> bytes:
+    """Запись topic, вложенная ровно на total уровней: вокруг значения у очереди ещё запись, список и строка, а у
+    решения — только запись."""
+    return record_with(topic, nested(total - (3 if topic == QUEUE else 1)), at)
+
+
+@pytest.mark.parametrize("topic", [QUEUE, DECISION])
+def test_nesting_up_to_the_bound_is_kept_and_rendered_one_level_deeper_is_malformed(topic):
+    """Граница глубины: запись ровно в MAX_RECORD_DEPTH уровней принимается и /api/state её отдаёт — граница ниже того,
+    что осиливает json_safe; на уровень глубже — malformed."""
+    bound = vs.MAX_RECORD_DEPTH
+    f = Feed()
+    f.raw(topic, at_depth(topic, bound), 1)
+    d = f.cache.data()
+    assert d.malformed == 0 and d.max_src_offset == {topic: 1}
+    app = va.create_app(two_stations(), FakeSources(vs.SourceSnapshots(kafka=ok(d), pg=pg_snapshot())), lambda: WALL)
+    status, _, _ = asyncio.run(asgi_get(app, "/api/state"))
+    assert status == 200
+    f.raw(topic, at_depth(topic, bound + 1, NOON + 2), 2)
+    d = f.cache.data()
+    assert d.malformed == 1 and d.max_src_offset == {topic: 1}
 
 
 @pytest.mark.parametrize(

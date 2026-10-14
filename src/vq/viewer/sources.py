@@ -38,6 +38,7 @@ SOURCE_TIMEOUT_S = 1.0
 TOPICS = (QUEUE_TOPIC, DECISION_TOPIC)
 QUEUE_ROW_FIELDS = ("unit_uuid", "eta", "service_start", "free_at", "wait_seconds")
 RECOMMENDED_FIELDS = ("from_station", "to_station", "gain_seconds")
+MAX_RECORD_DEPTH = 32  # уровней вложенности записи; по контракту §3.9 не больше трёх: запись, очередь, строка
 
 log = logging.getLogger("vq.viewer")
 
@@ -176,16 +177,31 @@ def event_ts(text: Any) -> int | None:
     return ts if TS_MIN <= ts < TS_MAX else None
 
 
+def _nested_deeper_than(obj: dict[str, Any] | list[Any], limit: int) -> bool:
+    """Глубже ли limit уровней вложенность obj (сам obj — первый уровень). Обход без рекурсии: на глубокой записи
+    рекурсия в Python падает уже на 1 000 уровней."""
+    stack: list[tuple[Any, int]] = [(obj, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > limit:
+            return True
+        for child in node.values() if isinstance(node, dict) else node:
+            if isinstance(child, (dict, list)):
+                stack.append((child, depth + 1))
+    return False
+
+
 def _json_object(value: bytes | None) -> dict[str, Any] | None:
     """JSON-объект записи или None. Не конечные числа (NaN, 1e999) json.loads пропускает: в /api/state они
-    становятся null (app.json_safe)."""
+    становятся null (app.json_safe). Глубокая вложенность — запись не той формы (§5.1): json.loads разбирает около
+    10 000 уровней, а json_safe рекурсивен и падает на 1 000, и одна такая запись гасила бы страницу."""
     if value is None:
         return None
     try:
         obj = json.loads(value)
     except (ValueError, RecursionError):  # UnicodeDecodeError и JSONDecodeError — подклассы ValueError
         return None
-    return obj if isinstance(obj, dict) else None
+    return obj if isinstance(obj, dict) and not _nested_deeper_than(obj, MAX_RECORD_DEPTH) else None
 
 
 def _queue_rows(rows: Any) -> tuple[Mapping[str, Any], ...] | None:
