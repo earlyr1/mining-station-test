@@ -507,8 +507,20 @@ def test_healthcheck_fails_without_metrics_server(cfg: dict[str, Any]) -> None:
 
 
 @needs_make
-def test_e2e_resets_without_demo_generator(fake_bin: tuple[Path, Path]) -> None:
-    """make e2e начинается со свежих томов без демо-генератора и передаёт инструментам адреса на хосте."""
+@pytest.mark.parametrize("exported", [False, True], ids=["shell-clean", "shell-exports-ports"])
+def test_e2e_resets_without_demo_generator(
+    fake_bin: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, exported: bool
+) -> None:
+    """make e2e начинается со свежих томов без демо-генератора и передаёт инструментам адреса на хосте.
+
+    run_make не передаёт make переменные VQ_* оболочки: порты в адресах — из .env или умолчания §2.2, и
+    экспортированные VQ_KAFKA_PORT и VQ_PG_PORT (документированное переопределение) тест не роняют.
+    """
+    for name, port in (("VQ_KAFKA_PORT", "29092"), ("VQ_PG_PORT", "25432")):
+        if exported:
+            monkeypatch.setenv(name, port)
+        else:
+            monkeypatch.delenv(name, raising=False)
     calls = make_calls("e2e", fake_bin)
     assert [c.split("|")[:2] for c in calls] == [
         ["docker", "compose --profile * down -v --remove-orphans"],
@@ -517,8 +529,8 @@ def test_e2e_resets_without_demo_generator(fake_bin: tuple[Path, Path]) -> None:
     ]
     uv = calls[-1]
     assert "UP_PROFILES=|" in uv  # вложенный make reset из e2e.py тоже без демо
-    kafka_port = os.environ.get("VQ_KAFKA_PORT") or _dotenv().get("VQ_KAFKA_PORT", "19092")
-    pg_port = os.environ.get("VQ_PG_PORT") or _dotenv().get("VQ_PG_PORT", "5432")
+    kafka_port = _dotenv().get("VQ_KAFKA_PORT", "19092")
+    pg_port = _dotenv().get("VQ_PG_PORT", "5432")
     assert f"VQ_KAFKA=127.0.0.1:{kafka_port}|" in uv
     assert uv.endswith(f"VQ_PG_DSN=postgresql://vq:vq@127.0.0.1:{pg_port}/vq")
     chaos = make_calls("e2e-chaos", fake_bin)
