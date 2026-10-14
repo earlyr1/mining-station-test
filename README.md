@@ -61,7 +61,7 @@ mkdir -p out && VQ_UID=$(id -u) VQ_GID=$(id -g) docker compose --profile demo up
 
 | Команда | Что проверяет | Последний прогон |
 |---|---|---|
-| `make test` | правила ТЗ и всё, что проверяется без брокера и БД | 736 тестов, ~52 с |
+| `make test` | правила ТЗ и всё, что проверяется без брокера и БД | 757 тестов, ~53 с |
 | `make test-integration` | хранилище на настоящем Postgres (testcontainers, нужен Docker) | 18 тестов, ~5,5 с |
 | `make e2e` | сквозной прогон на стенде с нуля, затем `verify` | PASS, 3,5–4 мин |
 | `make e2e-chaos` | то же плюс две аварии `dispatcher` | PASS, 3,5–4 мин |
