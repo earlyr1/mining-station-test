@@ -1,0 +1,56 @@
+[project]
+name = "vq"
+version = "0.1.0"
+description = "Виртуальные очереди: потоковый расчёт очередей станций и рекомендаций по телеметрии"
+requires-python = ">=3.12"
+dependencies = [
+    "confluent-kafka==2.15.1",
+    "psycopg[binary]==3.3.6",
+    "prometheus-client==0.26.0",
+    "fastapi==0.142.1",
+    "uvicorn==0.54.0",
+]
+
+[project.scripts]
+vq-dispatcher = "vq.dispatcher.main:main"
+vq-generator = "vq.generator.main:main"
+vq-viewer = "vq.viewer.app:main"
+vq-verify = "vq.tools.verify:main"
+vq-bench = "vq.tools.bench:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "hypothesis==6.168.3",
+    "testcontainers[postgres]==4.15.0",
+    "ruff==0.16.9",
+    "mypy==2.3.1",
+]
+
+[tool.uv]
+# и транзитивные зависимости не моложе двух недель на момент фиксации (§7); `uv lock` воспроизводим
+exclude-newer = "2026-09-30T00:00:00Z"
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: нужен Docker (testcontainers)"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+# комментарии и строки по-русски: кириллица не «неоднозначный юникод»
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+exclude = ["tests/"]
