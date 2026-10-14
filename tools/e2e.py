@@ -14,7 +14,8 @@ make уже выполнил `make reset UP_PROFILES=` (свежие тома, �
    Для каждой аварии — RestartCount до и после, код выхода (событие die) и время от выхода процесса
    (State.FinishedAt) до старта контейнера (State.StartedAt), claim (строка лога), нового epoch в Postgres
    (опрос каждые 50 мс) и первого чекпоинта после claim (updated_at). Все моменты — по часам ВМ Docker:
-   State.*, лог dispatcher, clock_timestamp() и updated_at Postgres.
+   State.*, лог dispatcher, clock_timestamp() и updated_at Postgres. Ошибки опроса за окно замера считаются:
+   с ними новый epoch и чекпоинт могли быть замечены позже, и строка аварии, таблица и отчёт об этом говорят.
 2. High watermark telemetry.v1; ждём, пока processor.next_offset его догонит.
 3. vq-verify в образе приложения (`docker compose run --rm --no-deps -T dispatcher vq-verify`): JSON последней строки.
 4. Проверки PASS/FAIL с числами; с --chaos — ещё таблица восстановления для README.
@@ -53,6 +54,7 @@ OUT = ROOT / "out"
 CRASH_FILE = "/tmp/vq-crash"  # VQ_CRASH_FILE сервиса dispatcher в docker-compose.yml
 SPEED, DURATION, SEED = 20, 3600, 42
 POLL_S = 0.05  # опрос строки processor во время аварий
+POLL_RETRY_S = 0.5  # пауза после ошибки опроса, затем новое соединение
 RESTART_TIMEOUT_S = 60.0
 RECOVERY_TIMEOUT_S = 60.0
 CATCH_UP_TIMEOUT_S = 300.0
@@ -157,7 +159,19 @@ class Crash:
     claim_pg: datetime | None = None  # updated_at строки processor от claim, если опрос его застал
     checkpoint: datetime | None = None  # updated_at первого чекпоинта после claim
     records: int | None = None  # записей в пачке, после которой сработала точка аварии
+    poll_errors: int | None = None  # ошибок опроса Postgres за окно замера: счётчик PgPoller до аварии и после
+    poll_error: str | None = None  # текст последней из них
     error: str | None = None
+
+
+def poll_note(c: Crash) -> str:
+    """Ошибки опроса Postgres за окно замера; с ними новый epoch и первый чекпоинт могли быть замечены позже."""
+    if not c.poll_errors:
+        return f"ошибок опроса Postgres за замер {'—' if c.poll_errors is None else 0}"
+    return (
+        f"ошибок опроса Postgres за замер {c.poll_errors} (последняя — {c.poll_error}): новый epoch и первый "
+        "чекпоинт могли быть замечены позже, их секунды могут быть завышены"
+    )
 
 
 def recovery(c: Crash) -> dict[str, float | None]:
@@ -201,19 +215,20 @@ def recovery_table(crashes: Sequence[Crash]) -> list[str]:
     lines = [
         "| Авария | Момент | Код выхода | RestartCount | выход → старт контейнера, с | выход → claim, с "
         "| выход → новый epoch виден в Postgres (опрос 50 мс), с | выход → первый чекпоинт (updated_at), с "
-        "| записей в пачке |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| записей в пачке | ошибок опроса Postgres за замер (> 0 — epoch и чекпоинт могут быть завышены) |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for c in crashes:
         r = recovery(c)
         name = CRASH_TITLES.get(c.kind, c.kind).split(": ", 1)[-1]
         moment = f"{c.planned_s:.0f} с прогона" + ("" if c.sim_s is None else f" (≈ {c.sim_s} с симуляции)")
         records = "—" if c.records is None else str(c.records)
+        polls = "—" if c.poll_errors is None else str(c.poll_errors)
         lines.append(
             f"| {name} | {moment} | {'—' if c.exit_code is None else c.exit_code} "
             f"| {c.restarts_before} → {'—' if c.restarts_after is None else c.restarts_after} "
             f"| {_num(r['restart_s'])} | {_num(r['claim_s'])} | {_num(r['epoch_seen_s'])} "
-            f"| {_num(r['checkpoint_s'])} | {records} |"
+            f"| {_num(r['checkpoint_s'])} | {records} | {polls} |"
         )
     return lines
 
@@ -390,6 +405,8 @@ def _crash(kind: str, f: Facts) -> Check:
     )
     if kind == "crash_file":
         detail += f"; записей в пачке {c.records}"
+    if c.poll_errors:  # замер шёл при ошибках опроса: числа под вопросом, но авария и восстановление — были
+        detail += f"; {poll_note(c)}"
     if c.error:
         detail += f"; ошибка: {c.error}"
     return Check(kind, name, crash_ok(c), detail)
@@ -547,12 +564,13 @@ def processor_row(dsn: str, site: str) -> dict[str, Any] | None:
 class PgPoller:
     """Фоновый опрос строки processor каждые POLL_S; моменты — по часам Postgres (clock_timestamp).
 
-    Опросы дописывает фоновый поток, читает основной: доступ к списку — под замком.
+    Опросы и ошибки дописывает фоновый поток, читает основной: доступ к ним — под замком.
     """
 
     def __init__(self, dsn: str, site: str) -> None:
         self.dsn, self.site = dsn, site
-        self.errors = 0
+        self.errors = 0  # ошибок опроса с запуска
+        self.last_error: str | None = None  # текст последней, одной строкой
         self._samples: list[PgSample] = []
         self._lock = threading.Lock()
         self._halt = threading.Event()
@@ -579,6 +597,11 @@ class PgPoller:
         with self._lock:
             return self._samples[-1] if self._samples else None
 
+    def failures(self) -> tuple[int, str | None]:
+        """(ошибок опроса с запуска, текст последней): снимки до и после аварии дают ошибки за окно замера."""
+        with self._lock:
+            return self.errors, self.last_error
+
     def _run(self) -> None:
         conn: psycopg.Connection[Any] | None = None
         while not self._halt.is_set():
@@ -591,12 +614,15 @@ class PgPoller:
                     sample = PgSample(at=row[3], epoch=row[0], next_offset=row[1], updated_at=row[2])
                     with self._lock:
                         self._samples.append(sample)
-            except psycopg.Error:
-                self.errors += 1
+            except psycopg.Error as e:
+                text = " ".join(str(e).split())
+                with self._lock:
+                    self.errors += 1
+                    self.last_error = f"{type(e).__name__}: {text}" if text else type(e).__name__
                 if conn is not None:
                     conn.close()
                 conn = None
-                self._halt.wait(0.5)
+                self._halt.wait(POLL_RETRY_S)
             self._halt.wait(max(0.0, POLL_S - (time.monotonic() - t0)))
         if conn is not None:
             conn.close()
@@ -737,14 +763,24 @@ def crash(kind: str, box: Container, poller: PgPoller, planned_s: float, sim_s: 
     last = poller.latest()
     c = Crash(kind, planned_s, box.inspect()["RestartCount"], None if last is None else last.epoch, sim_s=sim_s)
     mark, t_host = poller.mark(), time.time()
+    errors_before = poller.failures()[0]
     try:
         if c.epoch_before is None:
-            raise RuntimeError("строки processor ещё нет: dispatcher не забирал партицию")
+            errors, last_error = poller.failures()
+            raise RuntimeError(
+                f"нет ни одного опроса строки processor: ошибок опроса Postgres с запуска {errors}, "
+                f"последняя — {last_error}"
+                if errors
+                else "строки processor ещё нет: dispatcher не забирал партицию"
+            )
         strike(kind)
         measure(c, box, poller, mark, t_host)
     except Exception as e:  # авария не удалась или не измерена: это провал её проверки, а не всего прогона
         c.error = f"{type(e).__name__}: {e}"
     finally:
+        errors, last_error = poller.failures()  # окно замера: от отметки перед аварией до конца замера
+        c.poll_errors = errors - errors_before
+        c.poll_error = last_error if c.poll_errors else None
         if kind == "crash_file":  # не сработавшая точка аварии не должна выстрелить потом
             compose("exec", "-T", "dispatcher", "rm", "-f", CRASH_FILE, timeout=30)
     r = recovery(c)
@@ -753,7 +789,8 @@ def crash(kind: str, box: Container, poller: PgPoller, planned_s: float, sim_s: 
         f"RestartCount {c.restarts_before} → {c.restarts_after}, epoch {c.epoch_before} → {c.epoch_after}, "
         f"записей в пачке {'—' if c.records is None else c.records}; от выхода: старт {_num(r['restart_s'])} с, "
         f"claim {_num(r['claim_s'])} с, "
-        f"epoch виден в Postgres {_num(r['epoch_seen_s'])} с, первый чекпоинт {_num(r['checkpoint_s'])} с"
+        f"epoch виден в Postgres {_num(r['epoch_seen_s'])} с, первый чекпоинт {_num(r['checkpoint_s'])} с; "
+        + poll_note(c)
         + (f"; ОШИБКА: {c.error}" if c.error else "")
     )
     return c

@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import tomllib
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -28,6 +29,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import psycopg
 import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 
@@ -1271,3 +1273,166 @@ def test_crash_check_fails_when_recovery_is_incomplete(kind: str, change: dict[s
     f = good_facts(chaos=True)
     f.crashes = [replace(c, **change) if c.kind == kind else c for c in f.crashes]
     assert kind in failing(f)
+
+
+# --- tools/e2e.py: замер аварии на настоящем PgPoller ---------------------------------------------------------
+
+Row = tuple[int, int, datetime, datetime]  # epoch, next_offset, updated_at, clock_timestamp()
+
+
+class FakeProcessor:
+    """Postgres для PgPoller: строка processor и очередь ошибок — каждая роняет один опрос psycopg.OperationalError."""
+
+    def __init__(self, row: Row, failing: tuple[str, ...] = ()) -> None:
+        self._lock = threading.Lock()
+        self._row, self._fetched = row, row
+        self._failing = list(failing)
+
+    def set(self, row: Row, failing: tuple[str, ...] = ()) -> None:
+        with self._lock:
+            self._row, self._failing = row, list(failing)
+
+    def connect(self, *args: Any, **kwargs: Any) -> FakeProcessor:
+        return self
+
+    def execute(self, query: str, params: Any) -> FakeProcessor:
+        with self._lock:
+            if self._failing:
+                raise psycopg.OperationalError(self._failing.pop(0))
+            self._fetched = self._row
+        return self
+
+    def fetchone(self) -> Row:
+        return self._fetched
+
+    def close(self) -> None:
+        pass
+
+
+class FakeDispatcher:
+    """Контейнер dispatcher для E2E.crash: RestartCount 1; strike — выход с 137 в T0, старт в 350 мс, claim в 800."""
+
+    def __init__(self) -> None:
+        self.restarts = 1
+        self.events: list[dict[str, Any]] = []
+
+    def inspect(self) -> dict[str, Any]:
+        state = {"Running": True, "Restarting": False, "FinishedAt": "2026-10-14T07:00:00Z"}
+        return {"RestartCount": self.restarts, "State": {**state, "StartedAt": "2026-10-14T07:00:00.350Z"}}
+
+    def log_events(self, since: float) -> list[dict[str, Any]]:
+        return self.events
+
+    def exit_codes(self, since: float, until: float) -> list[int]:
+        return [137]
+
+    def strike(self) -> None:
+        self.restarts = 2
+        self.events = [{"event": "claim", "epoch": 5, "next_offset": 70_000, "ts": "2026-10-14T07:00:00.800Z"}]
+
+
+def wait_for(cond: Callable[[], bool], timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < deadline, "не дождались"
+        time.sleep(0.005)
+
+
+def crash_on_poller(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failing: tuple[str, ...], after: Row
+) -> tuple[Any, str]:
+    """E2E.crash("kill") с настоящим PgPoller поверх FakeProcessor: авария роняет опросы из failing, после них
+    строка processor — after. Первый опрос до аварии тоже падает: в окно замера эта ошибка не входит. Итог — авария
+    и её строка в выводе."""
+    pg = FakeProcessor((4, 70_000, ms(-100), ms(-50)), failing=("the database system is starting up",))
+    box = FakeDispatcher()
+
+    def strike(kind: str) -> None:
+        box.strike()
+        pg.set(after, failing)
+
+    monkeypatch.setattr(E2E.psycopg, "connect", pg.connect)
+    monkeypatch.setattr(E2E, "POLL_RETRY_S", 0.01)
+    monkeypatch.setattr(E2E, "strike", strike)
+    poller = E2E.PgPoller("postgresql://vq:vq@fake/vq", "site-1")
+    poller.start()
+    try:
+        wait_for(lambda: poller.latest() is not None)
+        capsys.readouterr()
+        c = E2E.crash("kill", box, poller, 108.0, 2160)
+    finally:
+        poller.stop()
+    return c, capsys.readouterr().out.strip()
+
+
+def kill_check_and_report(c: Any) -> tuple[Any, dict[str, Any]]:
+    """Проверка аварии kill и JSON-отчёт прогона, где эта авария — единственная."""
+    facts = E2E.Facts(chaos=True, crashes=[c])
+    checks = E2E.evaluate(facts)
+    rep = json.loads(json.dumps(E2E.report("e2e-chaos", facts, checks, {}), ensure_ascii=False, default=str))
+    return next(ch for ch in checks if ch.key == "kill"), rep
+
+
+def test_crash_window_without_poll_errors_is_not_flagged(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    c, line = crash_on_poller(monkeypatch, capsys, failing=(), after=(5, 70_500, ms(870), ms(900)))
+    assert c.error is None and E2E.recovery(c) == {
+        "restart_s": 0.35,
+        "claim_s": 0.8,
+        "epoch_seen_s": 0.9,
+        "checkpoint_s": 0.87,
+    }
+    assert line.endswith("первый чекпоинт 0.87 с; ошибок опроса Postgres за замер 0"), line
+    assert E2E.recovery_table([c])[2].endswith("| 0.87 | — | 0 |")
+    check, rep = kill_check_and_report(c)
+    assert check.ok and "опроса" not in check.detail
+    assert (rep["recovery"][0]["poll_errors"], rep["recovery"][0]["poll_error"]) == (0, None)
+
+
+def test_crash_window_with_poll_errors_is_flagged(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ошибки опроса во время аварии: первый чекпоинт (870 мс) пришёлся на паузу опроса, и опрос застал уже второй
+    (1500 мс). Строка аварии, таблица и отчёт говорят, что замер шёл при ошибках, и называют последнюю."""
+    failing = ("server closed the connection unexpectedly", "connection refused\n\tIs the server running?")
+    c, line = crash_on_poller(monkeypatch, capsys, failing, after=(5, 71_000, ms(1500), ms(1520)))
+    assert c.error is None and E2E.recovery(c)["checkpoint_s"] == 1.5  # завышено: настоящий первый — 0.87
+    last = "OperationalError: connection refused Is the server running?"  # одной строкой
+    flag = (
+        f"ошибок опроса Postgres за замер 2 (последняя — {last}): новый epoch и первый чекпоинт могли быть замечены "
+        "позже, их секунды могут быть завышены"
+    )
+    assert line.endswith(f"первый чекпоинт 1.50 с; {flag}"), line
+    table = E2E.recovery_table([c])
+    assert table[0].endswith("| ошибок опроса Postgres за замер (> 0 — epoch и чекпоинт могут быть завышены) |")
+    assert table[1].count("---") == table[0].count(" | ") + 1 == 10 and table[2].endswith("| 1.50 | — | 2 |")
+    check, rep = kill_check_and_report(c)
+    assert check.ok and check.detail.endswith(flag)  # авария и восстановление были: флаг, а не провал
+    assert (rep["recovery"][0]["poll_errors"], rep["recovery"][0]["poll_error"]) == (2, last)
+    assert next(ch for ch in rep["checks"] if ch["key"] == "kill")["detail"].endswith(flag)
+
+
+def test_crash_without_a_single_poll_names_the_poll_errors(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Опрос Postgres ни разу не прочитал строку processor (здесь — порт, где никто не слушает): в ошибке аварии —
+    ошибки опроса, а не «dispatcher не забирал партицию»; аварию без замера не начинают."""
+    struck: list[str] = []
+    monkeypatch.setattr(E2E, "POLL_RETRY_S", 0.01)
+    monkeypatch.setattr(E2E, "strike", struck.append)
+    poller = E2E.PgPoller(f"postgresql://vq:vq@127.0.0.1:{free_port()}/vq", "site-1")
+    poller.start()
+    try:
+        wait_for(lambda: poller.errors >= 1)
+    finally:
+        poller.stop()  # счётчик и текст замерли: ниже их можно сравнить точно
+    c = E2E.crash("kill", FakeDispatcher(), poller, 108.0, 2160)
+    assert c.error.startswith("RuntimeError: нет ни одного опроса строки processor: "), c.error
+    errors, last = poller.failures()
+    assert c.error == (
+        f"RuntimeError: нет ни одного опроса строки processor: ошибок опроса Postgres с запуска {errors}, "
+        f"последняя — {last}"
+    )
+    assert last.startswith("OperationalError: ") and "\n" not in last
+    assert struck == [] and c.epoch_before is None and f"ОШИБКА: {c.error}" in capsys.readouterr().out
