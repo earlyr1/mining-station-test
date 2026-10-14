@@ -1,0 +1,267 @@
+# Стенд «Виртуальные очереди» (§2.2). Порты на хосте берутся из .env (умолчания — как в спеке)
+# и публикуются только на 127.0.0.1. Тома redpanda-data и postgres-data живут и умирают вместе:
+# удаляются только `make reset` (`down -v`), `make down` их сохраняет (§7).
+# Проверено на Docker Compose v5.5.1 (нужны `--wait-timeout` и `--profile '*'`).
+name: vq
+
+# Один образ приложения на все команды (§7). Собирает его только dispatcher: при build у каждого
+# сервиса тег достаётся последней сборке со своей меткой сервиса, и каждый `up --build` пересоздавал
+# все контейнеры приложения, включая генератор посреди смены. pull_policy: never — в реестре такого
+# образа нет: без него первый `make up` и `docker compose run` сперва пытаются его скачать и печатают
+# ошибки; dispatcher при отсутствии образа его собирает.
+# user — пользователь хоста (make передаёт VQ_UID/VQ_GID): на Linux ./out принадлежит ему.
+# init: true — PID 1 у контейнера tini, поэтому `kill` процесса изнутри контейнера работает (make e2e-chaos).
+x-app: &app
+  image: ${COMPOSE_PROJECT_NAME:-vq}-app:latest
+  pull_policy: never
+  user: "${VQ_UID:-1000}:${VQ_GID:-1000}"
+  init: true
+
+x-app-env: &app-env
+  VQ_KAFKA: redpanda:9092
+  VQ_PG_DSN: postgresql://vq:vq@postgres:5432/vq
+  VQ_CONFIG: /app/config/site.toml
+
+# Приложение стартует после успешного redpanda-init и healthy postgres.
+x-app-deps: &app-deps
+  redpanda-init:
+    condition: service_completed_successfully
+  postgres:
+    condition: service_healthy
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      # Внешний адрес — 127.0.0.1, не localhost: порт опубликован только на IPv4, и librdkafka
+      # на хосте иначе сперва стучится в [::1] и пишет ошибки соединения.
+      - --advertise-kafka-addr=internal://redpanda:9092,external://127.0.0.1:${VQ_KAFKA_PORT:-19092}
+    ports:
+      - "127.0.0.1:${VQ_KAFKA_PORT:-19092}:19092"
+      - "127.0.0.1:${VQ_ADMIN_PORT:-19644}:9644"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    # Как у зависимых сервисов: после рестарта Docker поднимаются и брокер, и процессор.
+    restart: unless-stopped
+    healthcheck:
+      # Готовность — по строке «Healthy: true», а не по коду возврата rpk.
+      test: ["CMD-SHELL", "rpk cluster health | grep -Eq 'Healthy:[[:space:]]+true'"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v26.2.3
+    entrypoint: ["/bin/bash", "/deploy/redpanda-init.sh"]
+    volumes:
+      - ./deploy/redpanda-init.sh:/deploy/redpanda-init.sh:ro
+    # VOLUME образа не нужен одноразовому контейнеру: tmpfs вместо анонимного тома.
+    tmpfs:
+      - /var/lib/redpanda/data
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: "no"
+
+  postgres:
+    image: postgres:18.4-trixie
+    environment:
+      POSTGRES_USER: vq
+      POSTGRES_PASSWORD: vq
+      POSTGRES_DB: vq
+    ports:
+      - "127.0.0.1:${VQ_PG_PORT:-5432}:5432"
+    volumes:
+      # Postgres 18 хранит данные в /var/lib/postgresql/18/docker; том — на родительский каталог.
+      - postgres-data:/var/lib/postgresql
+    restart: unless-stopped
+    healthcheck:
+      # По TCP: временный сервер initdb слушает только сокет и не должен считаться готовым.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U vq -d vq"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  dispatcher:
+    <<: *app
+    build:
+      context: .
+    command: ["vq-dispatcher"]
+    environment:
+      <<: *app-env
+      VQ_METRICS_PORT: "9100"
+      # Точка аварии для make e2e-chaos: файла нет — хук ничего не делает.
+      VQ_CRASH_FILE: /tmp/vq-crash
+    ports:
+      - "127.0.0.1:${VQ_DISPATCHER_METRICS_PORT:-9100}:9100"
+    depends_on: *app-deps
+    # crash-only (§2.4): выход процесса (exit 1, 137) перезапускает контейнер. `docker compose kill`
+    # (любым сигналом) Docker считает ручной остановкой и НЕ перезапускает. Авария для e2e-chaos —
+    # изнутри: `docker compose exec -T dispatcher sh -c 'kill -KILL -1'` (все процессы, кроме tini).
+    restart: unless-stopped
+    stop_grace_period: 10s
+    healthcheck:
+      # healthy — партиция получена: vq_epoch > 0 ставит claim. /metrics поднимается раньше Kafka и claim,
+      # а при отказе старта (exit 2) epoch остаётся 0; так `make up --wait` ждёт работающий процессор.
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import sys, urllib.request;
+          body = urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=2).read().decode();
+          sys.exit(0 if any(s.startswith('vq_epoch ') and float(s.split()[1]) > 0 for s in body.splitlines()) else 1)
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  # Standby для демо перехвата: `docker compose --profile standby up -d dispatcher-b`.
+  # Партицию забирает, когда dispatcher пропал дольше session.timeout.ms (10 с), и отдаёт, когда тот вернулся.
+  dispatcher-b:
+    <<: *app
+    profiles: ["standby"]
+    command: ["vq-dispatcher"]
+    environment:
+      <<: *app-env
+      VQ_METRICS_PORT: "9100"
+      # Свой group.instance.id обязателен: с тем же id новый участник вытесняет старого (FENCED_INSTANCE_ID).
+      # И он должен быть БОЛЬШЕ id активного (dispatcher-<site_id>): range-ассайнер librdkafka сортирует
+      # static-участников по group.instance.id и отдаёт единственную партицию первому.
+      VQ_GROUP_INSTANCE_ID: dispatcher-site-1-standby
+    depends_on: *app-deps
+    restart: unless-stopped
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  # Демо-генератор (`make up`). make e2e поднимает стенд без него и запускает свой:
+  # `docker compose run --rm --use-aliases generator ...` (без --use-aliases контейнер run не виден
+  # по имени generator — ни Prometheus, ни витрине).
+  generator:
+    <<: *app
+    profiles: ["demo"]
+    # --allow-dirty — только для демо (§4.4): повторный `make up` после `make down` идёт по непустому топику.
+    command: ["vq-generator", "--speed", "${VQ_SPEED:-1}", "--allow-dirty"]
+    environment:
+      <<: *app-env
+      VQ_METRICS_PORT: "9101"
+    ports:
+      - "127.0.0.1:${VQ_GENERATOR_METRICS_PORT:-9101}:9101"
+    volumes:
+      - ./out:/out
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+    # Перезапуск генератора без сброса не поддерживается (§4.4).
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9101/metrics', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  viewer:
+    <<: *app
+    command: ["vq-viewer"]
+    environment:
+      <<: *app-env
+      # Оба экземпляра, как у Prometheus: витрина показывает владельца площадки (наибольший vq_epoch),
+      # недоступный standby (профиль standby не запущен) не мешает.
+      VQ_DISPATCHER_METRICS: http://dispatcher:9100/metrics,http://dispatcher-b:9100/metrics
+      VQ_GENERATOR_METRICS: http://generator:9101/metrics
+      VQ_SUMMARY: /out/summary.json
+    ports:
+      - "127.0.0.1:${VQ_VIEWER_PORT:-8000}:8000"
+    volumes:
+      - ./out:/out:ro
+    depends_on: *app-deps
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v3.12.0
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      REDPANDA_ADMINAPI_ENABLED: "true"
+      REDPANDA_ADMINAPI_URLS: http://redpanda:9644
+    ports:
+      - "127.0.0.1:${VQ_CONSOLE_PORT:-8080}:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/admin/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # История метрик — на время жизни контейнера; так down без -v не оставляет анонимных томов.
+    # mode=1777: Prometheus работает от nobody, а tmpfs по умолчанию принадлежит root (755).
+    tmpfs:
+      - /prometheus:mode=1777
+    ports:
+      - "127.0.0.1:${VQ_PROM_PORT:-9090}:9090"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    # Дашборд — http://localhost:<порт>/d/vq. GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH не используем:
+    # в Grafana 13 домашний дашборд из файла получает служебный uid, и анонимному зрителю не хватает прав.
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./deploy/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./deploy/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${VQ_GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  redpanda-data:
+  postgres-data:

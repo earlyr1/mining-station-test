@@ -1,0 +1,13 @@
+# Источник данных Grafana: Prometheus стенда. uid закреплён — на него ссылаются панели дашборда.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s

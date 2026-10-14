@@ -1,0 +1,19 @@
+# В образ копируются только pyproject.toml, uv.lock, .python-version, src, config, migrations.
+.git
+.venv
+.env
+out
+.scratch
+tests
+tools
+deploy
+docs
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.hypothesis
+.mypy_cache
+.ruff_cache
+.idea
+.vscode
+**/.DS_Store

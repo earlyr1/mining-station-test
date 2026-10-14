@@ -1,0 +1,16 @@
+# Сбор метрик стенда (§5.2, §4.6).
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Standby dispatcher-b (профиль standby) — в том же job: после перехвата партиции дашборд показывает его.
+  # Пока он не запущен, цель в состоянии down; панели берут датчики экземпляра с наибольшим vq_epoch.
+  - job_name: dispatcher
+    static_configs:
+      - targets: ["dispatcher:9100", "dispatcher-b:9100"]
+  # Генератор, запущенный через `docker compose run`, виден по имени только с --use-aliases.
+  - job_name: generator
+    static_configs:
+      - targets: ["generator:9101"]

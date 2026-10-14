@@ -1,0 +1,14 @@
+# Дашборды из файлов: deploy/grafana/dashboards монтируется в /etc/grafana/dashboards.
+apiVersion: 1
+
+providers:
+  - name: vq
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

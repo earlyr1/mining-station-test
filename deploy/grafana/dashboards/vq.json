@@ -1,0 +1,1911 @@
+{
+  "uid": "vq",
+  "title": "Виртуальные очереди",
+  "description": "Поток сообщений, решения, точность прогноза, очереди станций, чекпоинт и лаг (§5.2).",
+  "tags": [
+    "vq"
+  ],
+  "timezone": "utc",
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m"
+    ]
+  },
+  "schemaVersion": 41,
+  "version": 1,
+  "links": [],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "id": 1,
+      "title": "Состояние",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "dispatcher",
+      "description": "Prometheus достаёт /metrics dispatcher (job dispatcher: dispatcher и standby dispatcher-b, если запущен).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "нет",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "работает",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "max(up{job=\"dispatcher\"})",
+          "legendFormat": "",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "generator",
+      "description": "Prometheus достаёт /metrics генератора (job generator). Генератор из `docker compose run` виден только с --use-aliases.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "нет",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "работает",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "max(up{job=\"generator\"})",
+          "legendFormat": "",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "epoch",
+      "description": "Номер владения партицией (vq_epoch): растёт на каждом claim.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 8,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "max(vq_epoch)",
+          "legendFormat": "",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "«Сейчас» по времени событий",
+      "description": "vq_event_time_seconds — наибольший учтённый ts, UTC.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 11,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "max(vq_event_time_seconds) * 1000",
+          "legendFormat": "",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 6,
+      "title": "С последнего чекпоинта",
+      "description": "time() − vq_last_checkpoint_unixtime. Без входящих сообщений растёт — это нормально.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "time() - max(vq_last_checkpoint_unixtime)",
+          "legendFormat": "",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 7,
+      "title": "Самолечение за период",
+      "description": "vq_fsm_resync_total за выбранный период: машина встала у нецелевой станции или «к станции» вошла в радиус разгрузки (§3.5). При послушном генераторе — 0. increase() не теряет срабатывания при рестарте dispatcher.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "round(sum(increase(vq_fsm_resync_total[$__range]))) or vector(0)",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 8,
+      "title": "Поток сообщений и отбросы",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 9,
+      "title": "Сообщения, шт/с",
+      "description": "Обработанные dispatcher по результату (vq_messages_total) и отправленные генератором (vq_gen_telemetry_produced_total).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "sum by (result) (rate(vq_messages_total[$__rate_interval]))",
+          "legendFormat": "dispatcher: {{result}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "B",
+          "expr": "sum(rate(vq_gen_telemetry_produced_total[$__rate_interval]))",
+          "legendFormat": "generator: отправлено",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Отбросы, шт/мин: сервис против ожидания генератора",
+      "description": "Отброшенные dispatcher как не новые (vq_messages_total{result=\"not_newer\"}) и ожидаемые отбросы генератора (vq_gen_expected_drops_total), среднее за 5 минут. Линии должны совпадать; increase() переживает рестарт dispatcher. Точные числа с начала лога — processor.msgs_not_newer (витрина, make e2e).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "sum(increase(vq_messages_total{result=\"not_newer\"}[5m])) / 5",
+          "legendFormat": "dispatcher: отброшено",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "B",
+          "expr": "sum(increase(vq_gen_expected_drops_total[5m])) / 5",
+          "legendFormat": "generator: ожидалось",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 11,
+      "title": "Отбросы за период",
+      "description": "increase() за выбранный период: отброшено dispatcher и ожидалось генератором. Числа близки, но не обязаны совпадать до штуки: increase() экстраполирует, цели опрашиваются в разные моменты, а приращения упавшего процесса после последнего опроса теряются. Точное равенство processor.msgs_not_newer и expected_drops показывают витрина и make e2e.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "round(sum(increase(vq_messages_total{result=\"not_newer\"}[$__range])))",
+          "legendFormat": "dispatcher",
+          "range": false,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "B",
+          "expr": "round(sum(increase(vq_gen_expected_drops_total[$__range])))",
+          "legendFormat": "generator",
+          "range": false,
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 12,
+      "title": "Невалидные за период",
+      "description": "vq_messages_total{result=\"invalid\"} за выбранный период.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "round(sum(increase(vq_messages_total{result=\"invalid\"}[$__range]))) or vector(0)",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 13,
+      "title": "Сбои генератора",
+      "description": "vq_gen_faults_injected_total по типам: dup, late, outage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "sum by (type) (vq_gen_faults_injected_total)",
+          "legendFormat": "{{type}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 14,
+      "title": "Решения",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 15,
+      "title": "Решения, шт/мин",
+      "description": "vq_decisions_total по результату и причине, среднее за 5 минут.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "sum by (result, reason) (increase(vq_decisions_total[5m])) / 5",
+          "legendFormat": "{{result}} {{reason}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 16,
+      "title": "Выигрыш рекомендации, с",
+      "description": "vq_decision_gain_seconds: p50, p95 и среднее за 5 минут.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(vq_decision_gain_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vq_decision_gain_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "C",
+          "expr": "sum(rate(vq_decision_gain_seconds_sum[5m])) / sum(rate(vq_decision_gain_seconds_count[5m]))",
+          "legendFormat": "среднее",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 17,
+      "title": "Генератор: решения",
+      "description": "Нарастающим итогом: получено, исполнено и проигнорировано генератором (already_serving при послушном контуре — 0).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 20
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "sum(vq_gen_decisions_received_total)",
+          "legendFormat": "получено",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "B",
+          "expr": "sum(vq_gen_decisions_applied_total)",
+          "legendFormat": "исполнено",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "C",
+          "expr": "sum by (reason) (vq_gen_decisions_ignored_total)",
+          "legendFormat": "проигнорировано: {{reason}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "id": 18,
+      "title": "Решения за период",
+      "description": "vq_decisions_total за выбранный период по результату и причине.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "round(sum by (result, reason) (increase(vq_decisions_total[$__range])))",
+          "legendFormat": "{{result}} {{reason}}",
+          "range": false,
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 19,
+      "title": "Задержка исполнения рекомендации, с симуляции",
+      "description": "vq_gen_decision_delay_sim_seconds: тик, на котором генератор применил рекомендацию, минус тик входа машины в зону решения (§4.2 п. 4); при ускорении ×N растёт примерно в N раз.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(vq_gen_decision_delay_sim_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vq_gen_decision_delay_sim_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 20,
+      "title": "Точность прогноза",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Ошибка прогноза |факт − прогноз|, с",
+      "description": "vq_prediction_abs_error_seconds: модуль разницы фактического занятия и предсказанного начала обслуживания, p50 и p95 за 5 минут.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(vq_prediction_abs_error_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vq_prediction_abs_error_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "id": 22,
+      "title": "Ошибка прогноза со знаком за выбранный период",
+      "description": "vq_prediction_error_seconds: занятий в каждой корзине (факт − прогноз, с); отрицательное — заняли раньше прогноза.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "vertical",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "auto",
+        "sizing": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "sum by (le) (increase(vq_prediction_error_seconds_bucket[$__range]))",
+          "legendFormat": "{{le}}",
+          "range": false,
+          "instant": true,
+          "format": "heatmap"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 23,
+      "title": "Очереди станций",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 24,
+      "title": "Длина очереди",
+      "description": "vq_queue_length по станциям: строк в последней опубликованной очереди (экземпляр dispatcher, владеющий партицией).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "max by (station) ((vq_queue_length) and on(instance) (vq_epoch == scalar(max(vq_epoch))))",
+          "legendFormat": "{{station}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 25,
+      "title": "Публикации queue.v1, шт/мин",
+      "description": "vq_queue_publications_total по станциям.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "sum by (station) (rate(vq_queue_publications_total[$__rate_interval])) * 60",
+          "legendFormat": "{{station}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 26,
+      "title": "Освобождения станций, шт/мин",
+      "description": "vq_station_releases_total по станции и причине (timer | exit), среднее за 5 минут.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "sum by (station, reason) (increase(vq_station_releases_total[5m])) / 5",
+          "legendFormat": "{{station}} {{reason}}",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 27,
+      "title": "Чекпоинт и лаг",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 51
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 28,
+      "title": "Чекпоинт и пачка, с",
+      "description": "vq_checkpoint_seconds (транзакция Postgres) и vq_batch_seconds (пачка целиком), p50 и p95.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(vq_checkpoint_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "чекпоинт p50",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vq_checkpoint_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "чекпоинт p95",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "C",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(vq_batch_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "пачка p50",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "D",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vq_batch_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "пачка p95",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 29,
+      "title": "Лаг консьюмера, сообщений",
+      "description": "vq_consumer_lag_messages: high watermark telemetry.v1 минус следующий offset dispatcher (экземпляр, владеющий партицией).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "max((vq_consumer_lag_messages) and on(instance) (vq_epoch == scalar(max(vq_epoch))))",
+          "legendFormat": "лаг",
+          "range": true,
+          "instant": false
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 30,
+      "title": "Отставание по времени событий, с",
+      "description": "Часы минус «сейчас» (vq_event_time_lag_seconds, осмысленно только в реальном темпе) и время симуляции генератора минус «сейчас» dispatcher.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "A",
+          "expr": "max((vq_event_time_lag_seconds) and on(instance) (vq_epoch == scalar(max(vq_epoch))))",
+          "legendFormat": "часы − «сейчас»",
+          "range": true,
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "refId": "B",
+          "expr": "max(vq_gen_sim_time_seconds) - max(vq_event_time_seconds)",
+          "legendFormat": "генератор − dispatcher",
+          "range": true,
+          "instant": false
+        }
+      ]
+    }
+  ]
+}
