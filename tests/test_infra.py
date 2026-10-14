@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -33,6 +34,7 @@ from vq.core.engine import QUEUE_TOPIC
 from vq.core.model import SiteState
 from vq.dispatcher.main import TELEMETRY_TOPIC
 from vq.dispatcher.metrics import DispatcherMetrics
+from vq.generator.main import FLUSH_TIMEOUT_S, DecisionFeed
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SERVICES = ("dispatcher", "dispatcher-b", "generator", "viewer")
@@ -385,6 +387,19 @@ def test_start_order(cfg: dict[str, Any]) -> None:
 def test_dispatchers_get_ten_seconds_to_stop(cfg: dict[str, Any]) -> None:
     for name in ("dispatcher", "dispatcher-b"):
         assert cfg["services"][name]["stop_grace_period"] == "10s", name
+
+
+@needs_docker
+def test_generator_gets_time_to_flush_and_write_the_summary_on_stop(cfg: dict[str, Any]) -> None:
+    """SIGTERM от `make down` и `docker compose stop` (§4.4): flush ждёт до FLUSH_TIMEOUT_S, затем стоп ленты решений.
+
+    Без stop_grace_period Docker шлёт SIGKILL через 10 с, а это меньше FLUSH_TIMEOUT_S: при недоступном или
+    медленном брокере summary.json не пишется, а код выхода 137 вместо 1.
+    """
+    grace = cfg["services"]["generator"].get("stop_grace_period")
+    assert grace == "40s", grace
+    need = FLUSH_TIMEOUT_S + inspect.signature(DecisionFeed.stop).parameters["timeout"].default
+    assert float(grace.removesuffix("s")) >= need, f"{grace} меньше flush + стоп ленты решений = {need} с"
 
 
 @needs_docker

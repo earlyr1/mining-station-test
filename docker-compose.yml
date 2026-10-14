@@ -167,6 +167,10 @@ services:
         condition: service_completed_successfully
     # Перезапуск генератора без сброса не поддерживается (§4.4).
     restart: "no"
+    # SIGTERM (make down): flush до 30 с (FLUSH_TIMEOUT_S) + стоп ленты решений до 2 с, затем summary.json (§4.4).
+    # С умолчанием в 10 с при недоступном брокере SIGKILL обрывал flush: итога нет, код 137 вместо 1.
+    # Цена: make down ждёт такой генератор до 40 с.
+    stop_grace_period: 40s
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9101/metrics', timeout=2)"]
       interval: 2s
