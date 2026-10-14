@@ -51,10 +51,14 @@ INFO_ERRORS = frozenset({KafkaError._TRANSPORT, KafkaError._ALL_BROKERS_DOWN, Ka
 
 
 class KafkaFatal(Exception):
-    """Фатальная ошибка клиента Kafka: consumer — ошибка consume() с кодом _FATAL, producer — error_cb с fatal()."""
+    """Фатальная ошибка клиента Kafka: consumer — ошибка consume() с кодом _FATAL, error_cb с fatal() — страховка.
+
+    Фатальную ошибку producer confluent-kafka бросает исключением KafkaException: её находит fatal_kafka_exception.
+    """
 
 
-# Сбой → событие строки выхода с кодом 1 (§2.4), первое совпадение. StartRefused — код 2, прочее — exit_crash.
+# Сбой → событие строки выхода с кодом 1 (§2.4), первое совпадение. StartRefused — код 2, прочее — exit_crash,
+# кроме исключения с фатальной KafkaException в цепочке причин (fatal_kafka_exception): оно — exit_kafka_fatal.
 FAILURES: tuple[tuple[type[Exception], str], ...] = (
     (Fenced, "exit_fenced"),
     (DeliveryFailed, "exit_delivery_failed"),
@@ -114,6 +118,28 @@ def classify_error(err: KafkaError) -> str:
     if err.code() in INFO_ERRORS:
         return "info"
     return "other"
+
+
+def fatal_kafka_exception(e: BaseException) -> BaseException | None:
+    """KafkaException с фатальной ошибкой клиента (как у classify_error) — сама e или в цепочке её причин; иначе None.
+
+    confluent-kafka 2.15.1 не отдаёт фатальную ошибку producer в error_cb, а бросает из вызова, который обслуживал
+    клиента: poll() и flush() — KafkaException с fatal() == True, produce() после этого — с кодом _FATAL, а flush()
+    при ожидающем on_delivery — SystemError, у которого эта KafkaException в __cause__ и __context__. Цепочка идёт
+    так, как её показывает traceback: __cause__, иначе __context__, если его не скрыл `raise … from None`.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = e
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        err = cur.args[0] if isinstance(cur, KafkaException) and cur.args else None
+        if isinstance(err, KafkaError) and classify_error(err) == "fatal":
+            return cur
+        if cur.__cause__ is not None:
+            cur = cur.__cause__
+        else:
+            cur = None if cur.__suppress_context__ else cur.__context__
+    return None
 
 
 def offset_reset_reason(expected: int | None, low: int, high: int) -> str:
@@ -182,7 +208,9 @@ def on_kafka_error(err: KafkaError, processor: Processor | None) -> None:
     """error_cb обоих клиентов: ошибка — в лог; фатальная — KafkaFatal (выход 1, §2.4).
 
     Исключение из error_cb confluent-kafka пробрасывает из вызова, который обслуживал колбэк (poll, flush,
-    consume). Фатальные ошибки сюда приносит producer; фатальную ошибку consumer ловит classify_error.
+    consume). Сюда приходят нефатальные ошибки: фатальную ошибку producer confluent-kafka 2.15.1 в error_cb не
+    отдаёт, а бросает KafkaException (её находит fatal_kafka_exception), фатальную ошибку consumer отдаёт consume()
+    с кодом _FATAL (classify_error). Ветка fatal — страховка на случай, если клиент начнёт отдавать их сюда.
     """
     fatal = err.fatal()
     _event(
@@ -363,10 +391,13 @@ def exit_line(e: Exception, processor: Processor | None) -> int:
         _event(logging.ERROR, "start_refused", processor, reason=e.reason, detail=e.detail, hint=e.hint)
         return EXIT_REFUSED
     event = next((ev for kind, ev in FAILURES if isinstance(e, kind)), None)
+    cause: BaseException = e
+    if event is None and (fatal := fatal_kafka_exception(e)) is not None:
+        event, cause = "exit_kafka_fatal", fatal  # в error — сама фатальная ошибка, а не SystemError вокруг неё
     if event is None:  # в том числе исключение ядра: со стеком
         log.error("exit_crash", exc_info=e, extra={"fields": {} if processor is None else processor.context()})
     else:
-        _event(logging.ERROR, event, processor, error=describe(e))
+        _event(logging.ERROR, event, processor, error=describe(cause))
     return EXIT_FAILURE
 
 

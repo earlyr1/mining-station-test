@@ -139,7 +139,8 @@ def test_consume_error_classification(err, kind):
 
 
 def test_kafka_error_callback_logs_and_raises_only_on_fatal(caplog):
-    """error_cb: нефатальная ошибка — WARNING и работа дальше; фатальная (producer) — KafkaFatal, то есть выход 1."""
+    """error_cb: нефатальная ошибка — WARNING и работа дальше; фатальная — KafkaFatal, то есть выход 1 (страховка:
+    confluent-kafka 2.15.1 фатальную ошибку в error_cb не отдаёт, а бросает исключением, см. тесты exit_line)."""
     p, *_ = make()
     p.on_assign(40, 50)
     fatal = KafkaError(KafkaError.OUT_OF_ORDER_SEQUENCE_NUMBER, "Broker: Out of order sequence number", fatal=True)
@@ -251,27 +252,35 @@ class FakeConsumer:
 
 
 class FakeKafkaProducer:
-    """confluent_kafka.Producer: запоминает записи; fatal — ошибка, которую librdkafka отдаст в error_cb из flush."""
+    """confluent_kafka.Producer: запоминает записи; raises — (метод, исключение), которое этот метод бросает.
 
-    def __init__(self, remaining: int, fatal: KafkaError | None):
+    Так ведёт себя producer в фатальном состоянии: confluent-kafka 2.15.1 не отдаёт фатальную ошибку в error_cb,
+    а бросает её из вызова, который обслуживал клиента (poll, flush, produce)."""
+
+    def __init__(self, remaining: int, raises: tuple[str, BaseException] | None):
         self.conf: dict[str, Any] = {}
         self.produced: list[tuple] = []
         self.remaining = remaining
-        self.fatal = fatal
+        self.raises = raises
 
     def __call__(self, conf: dict[str, Any]) -> "FakeKafkaProducer":
         self.conf = conf
         return self
 
+    def _maybe_raise(self, method: str) -> None:
+        if self.raises is not None and self.raises[0] == method:
+            raise self.raises[1]
+
     def produce(self, topic, value, key, headers, on_delivery) -> None:
+        self._maybe_raise("produce")
         self.produced.append((topic, key, value, headers))
 
     def poll(self, timeout: float) -> int:
+        self._maybe_raise("poll")
         return 0
 
     def flush(self, timeout: float) -> int:
-        if self.fatal is not None:
-            self.conf["error_cb"](self.fatal)
+        self._maybe_raise("flush")
         return self.remaining
 
 
@@ -352,7 +361,7 @@ def run_dispatcher(monkeypatch, caplog) -> Callable[..., Ran]:
         accept: bool = True,
         store_error: Exception | None = None,
         remaining: int = 0,
-        producer_fatal: KafkaError | None = None,
+        producer_raises: tuple[str, BaseException] | None = None,
         partitions: int = 1,
         watermarks: tuple[int, int] = (0, 100),
         env: dict[str, str] | None = None,
@@ -374,7 +383,7 @@ def run_dispatcher(monkeypatch, caplog) -> Callable[..., Ran]:
         store = FakePgStore(
             claim or empty_claim(), accept, store_error, migrate_error, migrate_stuck, store_close_error
         )
-        producer = FakeKafkaProducer(remaining, producer_fatal)
+        producer = FakeKafkaProducer(remaining, producer_raises)
         reg = CollectorRegistry()
         opened: list[tuple[str, Path]] = []
 
@@ -422,6 +431,31 @@ def kafka_msgs(raws: list[bytes | None], start: int) -> list[Message]:
 
 def kafka_error(code: int, reason: str = "") -> Message:
     return Message(topic="telemetry.v1", partition=0, error=KafkaError(code, reason or None))
+
+
+# Исключения фатального producer в форме, которую бросает живой клиент (confluent-kafka 2.15.1, librdkafka 2.15.1):
+# проверено на Redpanda v26.2.3 и без брокера через rd_kafka_test_fatal_error. В error_cb такая ошибка не приходит.
+
+
+def fatal_producer_error() -> KafkaException:
+    """poll() и flush(): KafkaException, у её KafkaError fatal() == True, код — первопричина."""
+    return KafkaException(KafkaError(KafkaError.OUT_OF_ORDER_SEQUENCE_NUMBER, "Broker: Out of order", fatal=True))
+
+
+def produce_after_fatal_error() -> KafkaException:
+    """produce() после фатальной ошибки: код _FATAL, fatal() == False."""
+    return KafkaException(KafkaError(KafkaError._FATAL, "Unable to produce message: Local: Fatal error"))
+
+
+def system_error_from(cause: BaseException) -> SystemError:
+    """flush() при ожидающем on_delivery: CPython поднимает SystemError «returned a result with an exception set»
+    (msg.topic() в on_delivery), а исходное исключение остаётся в его __cause__ и __context__."""
+    text = "<method 'topic' of 'confluent_kafka.cimpl.Message' objects> returned a result with an exception set"
+    try:
+        raise SystemError(text) from cause
+    except SystemError as e:
+        e.__context__ = cause
+        return e
 
 
 def test_run_assigns_explicit_offset_commits_reports_lag_and_closes_on_stop(run_dispatcher):
@@ -511,14 +545,104 @@ def test_run_failure_exits_1_and_exit_line_names_epoch_and_batch(run_dispatcher,
         monkeypatch.setattr(Engine, "apply", _kernel_boom)
     elif case == "consumer_fatal":  # вытеснение по group.instance.id: код _FATAL, fatal() == False
         msgs = [kafka_error(KafkaError._FATAL, "Fatal error: Broker: Static consumer fenced by other consumer")]
-    elif case == "producer_fatal":
-        kw["producer_fatal"] = KafkaError(KafkaError.OUT_OF_ORDER_SEQUENCE_NUMBER, "Broker: Out of order", fatal=True)
+    elif case == "producer_fatal":  # flush() фатального producer бросает KafkaException, а не зовёт error_cb
+        kw["producer_raises"] = ("flush", fatal_producer_error())
     r = run_dispatcher([("assign",), ("msgs", msgs), ("msgs", kafka_msgs([None], 45))], watermarks=(40, 60), **kw)
     assert r.code == dmain.EXIT_FAILURE
     last = {k: r.lines[-1][k] for k in ("event", "level", "site", "epoch", "offset")}
     assert last == {"event": event, "level": "ERROR", "site": "test", "epoch": 7, "offset": 40}
     assert r.consumer.made("close") == [("close",)] and r.store.closed
     assert r.consumer.made("commit") == []  # следующая пачка не обрабатывалась
+
+
+def not_fatal_producer_error() -> KafkaException:
+    return KafkaException(KafkaError(KafkaError.MSG_SIZE_TOO_LARGE, "Unable to produce message: Too large"))
+
+
+@pytest.mark.parametrize(
+    ("method", "make_exc", "event"),
+    [
+        pytest.param("poll", fatal_producer_error, "exit_kafka_fatal", id="poll"),
+        pytest.param(
+            "flush", lambda: system_error_from(fatal_producer_error()), "exit_kafka_fatal", id="flush-system-error"
+        ),
+        pytest.param("produce", produce_after_fatal_error, "exit_kafka_fatal", id="produce"),
+        # не всякая KafkaException — фатальная ошибка клиента: прочие остаются исключением со стеком
+        pytest.param("produce", not_fatal_producer_error, "exit_crash", id="produce-not-fatal"),
+    ],
+)
+def test_run_producer_exception_exits_1_and_exit_line_names_the_fatal_error(run_dispatcher, method, make_exc, event):
+    """Фатальная ошибка producer приходит исключением из poll()/flush()/produce(), а при ожидающем on_delivery —
+    SystemError с этой ошибкой в __cause__: строка выхода exit_kafka_fatal называет саму ошибку (а не SystemError)."""
+    msgs = kafka_msgs(example(two_stations()), 40)
+    r = run_dispatcher(
+        [("assign",), ("msgs", msgs), ("msgs", kafka_msgs([None], 45))],
+        watermarks=(40, 60),
+        producer_raises=(method, make_exc()),
+    )
+    assert r.code == dmain.EXIT_FAILURE
+    last = r.lines[-1]
+    got = {k: last[k] for k in ("event", "level", "site", "epoch", "offset")}
+    assert got == {"event": event, "level": "ERROR", "site": "test", "epoch": 7, "offset": 40}
+    if event == "exit_kafka_fatal":
+        assert last["error"].startswith("KafkaException: KafkaError{")
+    assert r.consumer.made("close") == [("close",)] and r.store.closed
+    assert r.consumer.made("commit") == [] and r.store.checkpoints == []  # пачка не дошла до чекпоинта
+
+
+def with_cause(e: BaseException, cause: BaseException) -> BaseException:
+    e.__cause__ = cause  # как `raise e from cause`
+    return e
+
+
+def with_context(e: BaseException, context: BaseException, hidden: bool = False) -> BaseException:
+    e.__context__ = context  # как исключение, брошенное при обработке context
+    e.__suppress_context__ = hidden  # `raise … from None` прячет контекст
+    return e
+
+
+def cycle() -> BaseException:
+    a, b = RuntimeError("a"), RuntimeError("b")
+    a.__cause__, b.__cause__ = b, a
+    return a
+
+
+@pytest.mark.parametrize(
+    ("make_exc", "event"),
+    [
+        pytest.param(fatal_producer_error, "exit_kafka_fatal", id="fatal-flag"),
+        pytest.param(produce_after_fatal_error, "exit_kafka_fatal", id="fatal-code"),
+        pytest.param(lambda: system_error_from(fatal_producer_error()), "exit_kafka_fatal", id="system-error-cause"),
+        pytest.param(
+            lambda: with_context(RuntimeError("cleanup"), fatal_producer_error()), "exit_kafka_fatal", id="context"
+        ),
+        pytest.param(
+            lambda: with_cause(RuntimeError("wrapper"), system_error_from(fatal_producer_error())),
+            "exit_kafka_fatal",
+            id="nested",
+        ),
+        pytest.param(not_fatal_producer_error, "exit_crash", id="not-fatal"),
+        pytest.param(KafkaException, "exit_crash", id="no-args"),
+        pytest.param(lambda: KafkaException("не KafkaError"), "exit_crash", id="not-a-kafka-error"),
+        pytest.param(lambda: SystemError("no cause"), "exit_crash", id="system-error-alone"),
+        pytest.param(
+            lambda: with_cause(SystemError("wrapper"), not_fatal_producer_error()), "exit_crash", id="cause-not-fatal"
+        ),
+        pytest.param(
+            lambda: with_context(RuntimeError("x"), fatal_producer_error(), hidden=True), "exit_crash", id="hidden"
+        ),
+        pytest.param(cycle, "exit_crash", id="cycle"),
+    ],
+)
+def test_exit_line_finds_a_fatal_kafka_error_in_the_exception_chain(caplog, make_exc, event):
+    """Исключение само или его причина (__cause__, иначе не скрытый __context__) — KafkaException с фатальной ошибкой
+    клиента (fatal() или код _FATAL): строка exit_kafka_fatal с этой ошибкой в error, код 1. Иначе exit_crash."""
+    with caplog.at_level(logging.INFO, logger="vq.dispatcher"):
+        code = dmain.exit_line(make_exc(), None)
+    (rec,) = [r for r in caplog.records if r.name == "vq.dispatcher"]
+    assert (code, rec.getMessage()) == (dmain.EXIT_FAILURE, event)
+    if event == "exit_kafka_fatal":
+        assert rec.fields["error"].startswith("KafkaException: KafkaError{")
 
 
 @pytest.mark.parametrize(
