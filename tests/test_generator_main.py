@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from confluent_kafka import KafkaError, KafkaException
 from prometheus_client import CollectorRegistry
 
 from tests.helpers import two_stations
@@ -23,6 +24,7 @@ from vq.core.codec import Telemetry, encode_telemetry
 from vq.generator import main as gm
 from vq.generator.metrics import GeneratorMetrics
 from vq.generator.sim import DecisionStats, Sim
+from vq.logs import describe
 
 T0 = 1_789_473_600  # 2026-09-15T12:00:00Z
 UNITS = ("T-01", "T-02")
@@ -354,6 +356,8 @@ def test_stop_interrupts_wait_between_ticks():
 
 
 def test_fatal_producer_stops_loop():
+    """sink.fatal (produce() в send или страховка error_cb) останавливает цикл после тика. Фатальную ошибку, которую
+    живой клиент бросает из poll()/flush(), разбирает run() — см. test_run_fatal_producer_error_*."""
     clock = FakeClock()
     sink = FakeSink()
     stop = gm.StopFlag()
@@ -527,6 +531,8 @@ def test_sink_retries_on_buffer_error():
 
 
 def test_sink_stops_on_produce_exception_instead_of_crashing():
+    """produce() в фатальном состоянии: send не падает, цикл встаёт по sink.fatal. Живой клиент в том же тике бросает
+    ошибку ещё и из poll() — этот путь проверяет test_run_fatal_producer_error_*[produce-then-poll]."""
     from confluent_kafka import KafkaError, KafkaException
 
     class FatalProducer(FakeProducer):
@@ -564,8 +570,88 @@ def test_sink_counts_delivery_failures_and_fatal_errors():
 
     sink.on_error(Err(False))
     assert sink.fatal is None
+    # страховка: confluent-kafka 2.15.1 фатальную ошибку в error_cb не отдаёт, а бросает исключением (тесты ниже)
     sink.on_error(Err(True))
     assert sink.fatal == "boom"
+
+
+# Исключения фатального producer в той форме, что бросает живой клиент (confluent-kafka 2.15.1, librdkafka 2.15.1,
+# mock-кластер librdkafka): в error_cb такая ошибка не приходит. Те же формы — в test_dispatcher_main.py.
+SYSTEM_ERROR_TEXT = "<class 'str'> returned a result with an exception set"
+
+
+def fatal_producer_error() -> KafkaException:
+    """poll() и flush(): KafkaException, у её KafkaError fatal() == True, код — первопричина."""
+    return KafkaException(KafkaError(KafkaError.OUT_OF_ORDER_SEQUENCE_NUMBER, "Broker: Out of order", fatal=True))
+
+
+def produce_after_fatal_error() -> KafkaException:
+    """produce() после фатальной ошибки: код _FATAL, fatal() == False."""
+    return KafkaException(KafkaError(KafkaError._FATAL, "Unable to produce message: Local: Fatal error"))
+
+
+def not_fatal_producer_error() -> KafkaException:
+    return KafkaException(KafkaError(KafkaError.MSG_SIZE_TOO_LARGE, "Unable to produce message: Too large"))
+
+
+def system_error_from(cause: BaseException) -> SystemError:
+    """flush() при ожидающем on_delivery: str(err) в on_delivery генератора поднимает SystemError «returned a result
+    with an exception set», а исходное исключение остаётся в его __cause__ и __context__."""
+    try:
+        raise SystemError(SYSTEM_ERROR_TEXT) from cause
+    except SystemError as e:
+        e.__context__ = cause
+        return e
+
+
+def with_cause(e: BaseException, cause: BaseException) -> BaseException:
+    e.__cause__ = cause  # как `raise e from cause`
+    return e
+
+
+def with_context(e: BaseException, context: BaseException, hidden: bool = False) -> BaseException:
+    e.__context__ = context  # как исключение, брошенное при обработке context
+    e.__suppress_context__ = hidden  # `raise … from None` прячет контекст
+    return e
+
+
+def cycle() -> BaseException:
+    a, b = RuntimeError("a"), RuntimeError("b")
+    a.__cause__, b.__cause__ = b, a
+    return a
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param(lambda fatal: fatal, id="itself"),
+        pytest.param(system_error_from, id="system-error-cause"),
+        pytest.param(lambda fatal: with_context(RuntimeError("cleanup"), fatal), id="context"),
+        pytest.param(lambda fatal: with_cause(RuntimeError("wrapper"), system_error_from(fatal)), id="nested"),
+    ],
+)
+@pytest.mark.parametrize("make_fatal", [fatal_producer_error, produce_after_fatal_error], ids=["flag", "code"])
+def test_fatal_kafka_exception_finds_the_fatal_error_in_the_exception_chain(wrap, make_fatal):
+    """KafkaException с фатальной ошибкой клиента (fatal() или код _FATAL) — само исключение или его причина
+    (__cause__, иначе не скрытый __context__): находится именно она, а не SystemError вокруг неё."""
+    fatal = make_fatal()
+    assert gm.fatal_kafka_exception(wrap(fatal)) is fatal
+
+
+@pytest.mark.parametrize(
+    "make_exc",
+    [
+        pytest.param(not_fatal_producer_error, id="not-fatal"),
+        pytest.param(KafkaException, id="no-args"),
+        pytest.param(lambda: KafkaException("не KafkaError"), id="not-a-kafka-error"),
+        pytest.param(lambda: SystemError(SYSTEM_ERROR_TEXT), id="system-error-alone"),
+        pytest.param(lambda: system_error_from(not_fatal_producer_error()), id="cause-not-fatal"),
+        pytest.param(lambda: with_context(RuntimeError("x"), fatal_producer_error(), hidden=True), id="hidden"),
+        pytest.param(cycle, id="cycle"),
+    ],
+)
+def test_fatal_kafka_exception_is_none_without_a_fatal_error(make_exc):
+    assert gm.fatal_kafka_exception(make_exc()) is None
 
 
 # --- поток решений и проверка топика ----------------------------------------------------
@@ -783,18 +869,32 @@ def test_read_tail_times_out_when_tail_is_incomplete():
 
 
 class DeliveringProducer:
-    """Продюсер с доставкой: колбэки on_delivery вызываются в poll/flush, как в librdkafka."""
+    """Продюсер с доставкой: колбэки on_delivery вызываются в poll/flush, как в librdkafka.
+
+    raise_next[метод] — исключение, которое poll или flush бросит при следующем вызове, один раз: живой клиент бросает
+    фатальную ошибку из того вызова, который её обслужил, а следующий flush уже доставляет отчёты и возвращает остаток.
+    produce_error — исключение каждого produce() (после фатальной ошибки — KafkaException с кодом _FATAL).
+    """
 
     def __init__(self, conf: dict, fail_first: int = 0) -> None:
         self.conf = conf
         self.fail_first = fail_first
         self.values: list[bytes] = []
         self.flushes = 0
+        self.raise_next: dict[str, BaseException] = {}
+        self.produce_error: BaseException | None = None
         self._pending: list[Callable] = []
 
     def produce(self, topic, key=None, value=None, on_delivery=None):
+        if self.produce_error is not None:
+            raise self.produce_error
         self.values.append(value)
         self._pending.append(on_delivery)
+
+    def _raise_next(self, method: str) -> None:
+        exc = self.raise_next.pop(method, None)
+        if exc is not None:
+            raise exc
 
     def _deliver(self) -> None:
         pending, self._pending = self._pending, []
@@ -806,11 +906,13 @@ class DeliveringProducer:
                 cb(None, None)
 
     def poll(self, timeout: float) -> int:
+        self._raise_next("poll")
         self._deliver()
         return 0
 
     def flush(self, timeout: float) -> int:
         self.flushes += 1
+        self._raise_next("flush")
         self._deliver()
         return 0
 
@@ -1028,6 +1130,93 @@ def test_run_failure_in_the_final_drain_still_flushes_and_writes_summary(tmp_pat
     assert s["stopped_by"] == "error" and "drain bug" in s["error"] and s["ticks"] == 20
     assert s["produced"] == 20 * len(UNITS)  # тики ушли, досылка не состоялась
     assert r.made["producer"].flushes == 1 and r.made["consumer"].closed
+
+
+def fail_producer_at(
+    k: int, raises: dict[str, Callable[[], BaseException]], produce: Callable[[], BaseException] | None = None
+) -> Callable[[int, dict[str, Any]], None]:
+    """hook для run_generator: с тика k продюсер бросает исключения — raises из poll/flush (по разу), produce из
+    каждого produce()."""
+
+    def hook(tick: int, made: dict[str, Any]) -> None:
+        if tick == k:
+            producer = made["producer"]
+            producer.raise_next.update({method: make() for method, make in raises.items()})
+            if produce is not None:
+                producer.produce_error = produce()
+
+    return hook
+
+
+@pytest.mark.parametrize(
+    ("raises", "produce", "ticks", "first"),
+    [
+        # тик 3: poll() обслужил фатальную ошибку и бросил её
+        pytest.param({"poll": fatal_producer_error}, None, 3, fatal_producer_error, id="poll"),
+        # так на живом клиенте при x20: produce() этого тика уже бросил ошибку с кодом _FATAL (её ловит send),
+        # затем poll() бросил саму фатальную ошибку
+        pytest.param(
+            {"poll": fatal_producer_error},
+            produce_after_fatal_error,
+            3,
+            produce_after_fatal_error,
+            id="produce-then-poll",
+        ),
+        # так на живом клиенте при x2000: ошибка пришла в последнем flush(), когда ждали отчёты о доставке
+        pytest.param(
+            {"flush": lambda: system_error_from(fatal_producer_error())},
+            None,
+            20,
+            fatal_producer_error,
+            id="flush-system-error",
+        ),
+    ],
+)
+def test_run_fatal_producer_error_stops_with_kafka_fatal_and_names_it(
+    tmp_path, caplog, keep_signal_handlers, raises, produce, ticks, first
+):
+    """§4.4: фатальная ошибка продюсера приходит не в error_cb, а исключением из poll()/flush() (из flush() при
+    ожидающем on_delivery — SystemError с ней в __cause__). Итог: stopped_by kafka_fatal, в error — сама ошибка Kafka,
+    а не SystemError вокруг неё, код 1; в run_incomplete.fatal — первая фатальная ошибка продюсера."""
+    with caplog.at_level(logging.INFO, logger="vq.generator"):
+        r = run_generator(tmp_path, hook=fail_producer_at(3, raises, produce))
+    s = r.summary
+    want = {"stopped_by": "kafka_fatal", "error": describe(fatal_producer_error()), "ticks": ticks}
+    assert (r.code, {key: s[key] for key in want}) == (gm.EXIT_FAIL, want)
+    logged = {rec.getMessage(): rec for rec in caplog.records if rec.name == "vq.generator"}
+    assert logged["run_incomplete"].fields["fatal"] == str(first())
+    # строка без стека, как exit_kafka_fatal у dispatcher: это ошибка клиента Kafka, а не сбой кода
+    assert logged["kafka_fatal"].fields == {"error": s["error"], "ticks": ticks} and "run_failed" not in logged
+    # уже отправленное доставляется: flush после ошибки (второй, если бросил первый); поток решений остановлен
+    assert r.made["producer"].flushes == (2 if "flush" in raises else 1) and r.made["consumer"].closed
+
+
+@pytest.mark.parametrize(
+    ("raises", "ticks", "error"),
+    [
+        pytest.param({"poll": not_fatal_producer_error}, 3, describe(not_fatal_producer_error()), id="poll-not-fatal"),
+        # голый SystemError из flush(), без фатальной ошибки в цепочке: прежний путь сбоя
+        pytest.param(
+            {"flush": lambda: SystemError(SYSTEM_ERROR_TEXT)},
+            20,
+            f"SystemError: {SYSTEM_ERROR_TEXT}",
+            id="flush-system-error-alone",
+        ),
+    ],
+)
+def test_run_producer_exception_without_a_fatal_error_stays_an_error(
+    tmp_path, caplog, keep_signal_handlers, raises, ticks, error
+):
+    """Не всякое исключение продюсера — фатальная ошибка клиента: прочие, как и сбой цикла, — stopped_by error и
+    строка run_failed со стеком; sink.fatal не выставляется."""
+    with caplog.at_level(logging.INFO, logger="vq.generator"):
+        r = run_generator(tmp_path, hook=fail_producer_at(3, raises))
+    s = r.summary
+    want = {"stopped_by": "error", "error": error, "ticks": ticks}
+    assert (r.code, {key: s[key] for key in want}) == (gm.EXIT_FAIL, want)
+    logged = {rec.getMessage(): rec for rec in caplog.records if rec.name == "vq.generator"}
+    assert logged["run_incomplete"].fields["fatal"] is None
+    assert logged["run_failed"].exc_info is not None and "kafka_fatal" not in logged
 
 
 def test_run_counts_a_decision_the_sim_cannot_take_and_goes_on(tmp_path, keep_signal_handlers):

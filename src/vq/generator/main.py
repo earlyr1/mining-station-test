@@ -272,6 +272,29 @@ def finish(injector: FaultInjector, sink: KafkaSink, flush_timeout: float = FLUS
 # --- Kafka ---------------------------------------------------------------
 
 
+def fatal_kafka_exception(e: BaseException) -> BaseException | None:
+    """KafkaException с фатальной ошибкой клиента (fatal() или код _FATAL) — сама e или в цепочке её причин; иначе None.
+
+    confluent-kafka 2.15.1 не отдаёт фатальную ошибку producer в error_cb, а бросает из вызова, который обслуживал
+    клиента: poll() и flush() — KafkaException с fatal() == True, produce() после этого — с кодом _FATAL, а flush()
+    при ожидающем on_delivery — SystemError, у которого эта KafkaException в __cause__ и __context__. Цепочка идёт
+    так, как её показывает traceback: __cause__, иначе __context__, если его не скрыл `raise … from None`.
+    Тот же поиск, что у dispatcher (vq.dispatcher.main), без зависимости генератора от dispatcher и psycopg.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = e
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        err = cur.args[0] if isinstance(cur, KafkaException) and cur.args else None
+        if isinstance(err, KafkaError) and (err.fatal() or err.code() == KafkaError._FATAL):
+            return cur
+        if cur.__cause__ is not None:
+            cur = cur.__cause__
+        else:
+            cur = None if cur.__suppress_context__ else cur.__context__
+    return None
+
+
 class KafkaSink:
     """Продюсер telemetry.v1: ключ unit_uuid, значение encode_telemetry; при переполнении очереди — poll и повтор."""
 
@@ -311,7 +334,12 @@ class KafkaSink:
         return int(self._producer.flush(timeout))
 
     def on_error(self, err: KafkaError) -> None:
-        """error_cb продюсера: фатальная ошибка останавливает генератор, остальное librdkafka переживёт сам."""
+        """error_cb продюсера: ошибка — в лог, нефатальную librdkafka переживёт сам.
+
+        Фатальную ошибку producer confluent-kafka 2.15.1 в error_cb не отдаёт, а бросает исключением из poll() и
+        flush() (его разбирает _tick_until_stop через fatal_kafka_exception); produce() после неё бросает тоже (ловит
+        send). Ветка fatal — страховка на случай, если клиент начнёт отдавать её сюда: цикл остановится по sink.fatal.
+        """
         if err.fatal():
             self.fatal = str(err)
             log.error("kafka_fatal", extra={"fields": {"error": str(err)}})
@@ -596,7 +624,9 @@ def _tick_until_stop(
     """Тики до конца --duration или до сигнала, затем досылка отложенного и flush.
 
     Возвращает ход цикла, число недоставленных сообщений и текст ошибки. Исключение в цикле или в досылке не
-    обрывает процесс трассировкой: уже отправленное доставляется, итог пишется с error (код выхода 1).
+    обрывает процесс трассировкой: уже отправленное доставляется, итог пишется с error (код выхода 1). Фатальная
+    ошибка продюсера приходит таким же исключением (fatal_kafka_exception): остановка kafka_fatal, в error — сама
+    ошибка Kafka, а не SystemError вокруг неё.
     """
     fields = {
         "site": cfg.site_id,
@@ -635,9 +665,17 @@ def _tick_until_stop(
         )
         remaining = finish(injector, sink)
     except Exception as e:  # сбой симулятора, инжектора или продюсера: итог важнее трассировки
-        error = describe(e)
-        stop.set("error")
-        log.exception("run_failed", extra={"fields": {"ticks": progress.ticks}})
+        fatal = fatal_kafka_exception(e)
+        if fatal is None:
+            error = describe(e)
+            stop.set("error")
+            log.exception("run_failed", extra={"fields": {"ticks": progress.ticks}})
+        else:  # фатальная ошибка продюсера (§4.4): сбой клиента Kafka, а не кода, — строка без стека
+            error = describe(fatal)  # сама ошибка Kafka, а не SystemError вокруг неё
+            stop.set("kafka_fatal")
+            if sink.fatal is None:
+                sink.fatal = str(fatal)
+            log.error("kafka_fatal", extra={"fields": {"error": error, "ticks": progress.ticks}})
         remaining = sink.flush(FLUSH_TIMEOUT_S)
     finally:
         if feed is not None:
