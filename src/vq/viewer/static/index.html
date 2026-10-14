@@ -1,0 +1,994 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Виртуальные очереди</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%232a78d6'/%3E%3Ccircle cx='8' cy='8' r='2.5' fill='%23fcfcfb'/%3E%3C/svg%3E">
+<style>
+/* Токены. Цвета серий проверены валидатором палитры (все пары, оба режима). */
+:root {
+  color-scheme: light;
+  --plane: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f3f2ee;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-3: #6f6e69;
+  --hair: #e1e0d9;
+  --line: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --s-to-station: #2a78d6;
+  --s-waiting: #eb6834;
+  --s-service: #1baf7a;
+  --s-to-dump: #898781;
+  --good: #0ca30c;
+  --critical: #d03b3b;
+  --accent: #2a78d6;
+  --wash: rgba(42, 120, 214, 0.10);
+  --wash-strong: rgba(42, 120, 214, 0.20);
+  --shadow: 0 1px 2px rgba(11, 11, 11, 0.04), 0 4px 16px rgba(11, 11, 11, 0.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --plane: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #222220;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --ink-3: #9a9890;
+    --hair: #2c2c2a;
+    --line: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --s-to-station: #3987e5;
+    --s-waiting: #d95926;
+    --s-service: #199e70;
+    --s-to-dump: #898781;
+    --accent: #3987e5;
+    --wash: rgba(57, 135, 229, 0.14);
+    --wash-strong: rgba(57, 135, 229, 0.28);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.35);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #222220;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --ink-3: #9a9890;
+  --hair: #2c2c2a;
+  --line: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --s-to-station: #3987e5;
+  --s-waiting: #d95926;
+  --s-service: #199e70;
+  --s-to-dump: #898781;
+  --accent: #3987e5;
+  --wash: rgba(57, 135, 229, 0.14);
+  --wash-strong: rgba(57, 135, 229, 0.28);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--plane);
+  color: var(--ink);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+::selection { background: var(--wash-strong); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+*::-webkit-scrollbar-track { background: transparent; }
+h1, h2 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+h1 { font-size: 16px; }
+h2 { font-size: 14px; }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--ink-3); }
+
+.app { display: flex; flex-direction: column; height: 100vh; min-height: 640px; }
+
+/* Шапка */
+.top {
+  display: flex; align-items: center; gap: 24px;
+  padding: 12px 16px 10px;
+}
+.title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.title .muted { white-space: nowrap; }
+.now { display: flex; align-items: baseline; gap: 8px; margin-left: auto; }
+.now-label { color: var(--ink-3); }
+.now-time { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.now-date { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.sources { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 10px 0 8px;
+  border: 1px solid var(--border); border-radius: 13px;
+  background: var(--surface); color: var(--ink-2); white-space: nowrap;
+}
+.pill svg { width: 14px; height: 14px; flex: none; }
+.pill.down { color: var(--ink); }
+.ico-good { color: var(--good); }
+.ico-bad { color: var(--critical); }
+.ico-idle { color: var(--ink-3); }
+.icon-btn {
+  display: inline-grid; place-items: center; width: 30px; height: 30px; flex: none;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--ink-2); cursor: pointer;
+}
+.icon-btn:hover { color: var(--ink); background: var(--surface-2); }
+.icon-btn svg { width: 16px; height: 16px; }
+
+/* Баннер недоступных источников */
+.banner {
+  display: flex; flex-direction: column; gap: 2px;
+  margin: 0 16px 10px; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface);
+}
+.banner[hidden] { display: none; }
+.banner-row { display: flex; gap: 8px; align-items: flex-start; }
+.banner-row svg { width: 14px; height: 14px; flex: none; margin-top: 2px; }
+
+/* Полоса здоровья */
+.health {
+  display: flex; flex-wrap: wrap; gap: 6px 0;
+  margin: 0 16px 12px; padding: 8px 4px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+}
+.hgroup { display: flex; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; padding: 0 14px; border-left: 1px solid var(--hair); }
+.hgroup:first-child { border-left: 0; }
+.hgroup-name { color: var(--ink-3); }
+.kv { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.kv .k { color: var(--ink-2); }
+.kv .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+.badge { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-2); white-space: nowrap; }
+.badge svg { width: 13px; height: 13px; align-self: center; }
+
+/* Раскладка */
+.layout {
+  flex: 1; min-height: 0;
+  display: grid; gap: 12px;
+  grid-template-columns: minmax(0, 1.75fr) minmax(300px, 1fr);
+  grid-template-rows: minmax(320px, 1.55fr) minmax(210px, 1fr);
+  padding: 0 16px 16px;
+}
+.panel {
+  display: flex; flex-direction: column; min-height: 0; min-width: 0;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.panel-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px 8px; }
+.panel-head .muted { margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Карта */
+.map-panel { position: relative; }
+.seg { display: inline-flex; margin-left: auto; padding: 3px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border); }
+.seg button {
+  white-space: nowrap; border: 0; background: transparent; color: var(--ink-2); font: inherit; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+}
+.seg button:hover { color: var(--ink); }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(11, 11, 11, 0.08); }
+.map-wrap { position: relative; flex: 1; min-height: 0; margin: 0 8px; border-radius: 8px; overflow: hidden; }
+.map-wrap svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.map-note {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  max-width: 340px; padding: 10px 14px; text-align: center;
+  color: var(--ink-2); background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+}
+.map-note[hidden] { display: none; }
+.stale-data .map-wrap svg #g-veh, .stale-data .map-wrap svg #g-links { opacity: 0.45; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 8px 14px 10px; color: var(--ink-2); font-size: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend svg { width: 14px; height: 10px; flex: none; }
+.map-marks { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+.road { stroke: var(--hair); stroke-width: 2; fill: none; stroke-linecap: round; }
+.zone { stroke: var(--line); stroke-width: 1; fill: var(--wash); fill-opacity: 0.35; stroke-dasharray: 5 4; }
+.radius { stroke: var(--ink-2); stroke-width: 1.25; fill: var(--surface); }
+.station-dot { fill: var(--ink); }
+.dump-mark { fill: var(--surface); stroke: var(--ink-2); stroke-width: 1.5; }
+.lbl { fill: var(--ink); font-size: 12px; font-weight: 600; }
+.lbl-halo { paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }
+.scale line { stroke: var(--ink-2); stroke-width: 1; }
+.scale text { fill: var(--ink-3); font-size: 11px; }
+.link { stroke: var(--s-to-station); stroke-width: 1.5; stroke-dasharray: 4 3; fill: none; opacity: 0.85; }
+.veh .dot { stroke: var(--surface); stroke-width: 2; paint-order: stroke; }
+.veh .hit { fill: transparent; cursor: default; }
+.veh.p-to_station .dot { fill: var(--s-to-station); }
+.veh.p-waiting .dot { fill: var(--s-waiting); }
+.veh.p-service .dot { fill: var(--s-service); }
+.veh.p-served .dot { fill: var(--surface); stroke: var(--s-service); stroke-width: 2; }
+.veh.p-to_dump .dot { fill: var(--s-to-dump); }
+.veh.stale { opacity: 0.35; }
+.veh .ring { fill: none; stroke: var(--ink); stroke-width: 1.5; opacity: 0; }
+.veh.hl .ring { opacity: 1; }
+.ov-frame { fill: var(--surface); stroke: var(--border); }
+.ov-road { stroke: var(--hair); stroke-width: 1; }
+.ov-window { fill: var(--wash); stroke: var(--accent); stroke-width: 1; }
+.ov-dot { stroke: none; }
+
+.tip {
+  position: absolute; z-index: 2; pointer-events: none; min-width: 150px;
+  padding: 8px 10px; border-radius: 8px;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--border); box-shadow: var(--shadow);
+}
+.tip[hidden] { display: none; }
+.tip strong { display: block; font-size: 13px; }
+.tip span { display: block; color: var(--ink-2); }
+
+/* Лента решений */
+.feed-panel .panel-head { border-bottom: 1px solid var(--hair); }
+.feed { list-style: none; margin: 0; padding: 4px 0; overflow: auto; flex: 1; min-height: 0; }
+.dec {
+  display: grid; grid-template-columns: 62px 16px 46px 1fr; align-items: baseline; gap: 0 8px;
+  padding: 5px 14px; border-bottom: 1px solid var(--hair);
+}
+.dec:last-child { border-bottom: 0; }
+.dec:hover { background: var(--surface-2); }
+.dec-time { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.dec-icon { align-self: center; display: grid; place-items: center; color: var(--ink-3); }
+.dec-icon svg { width: 14px; height: 14px; }
+.dec.rec .dec-icon { color: var(--accent); }
+.dec-unit { font-weight: 600; }
+.dec-what { color: var(--ink-2); min-width: 0; }
+.dec.rec .dec-what { color: var(--ink); }
+.dec-gain { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.dec.fresh { animation: arrive 1200ms cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes arrive { from { background: var(--wash-strong); } to { background: transparent; } }
+.empty { padding: 14px; color: var(--ink-3); }
+.empty strong { display: block; color: var(--ink-2); font-weight: 600; margin-bottom: 2px; }
+
+/* Очереди станций */
+.queues { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; min-height: 0; }
+.qcard { container-type: inline-size; }
+.qcard .panel-head { flex-wrap: wrap; gap: 2px 10px; padding-bottom: 6px; }
+.qcard .q-status { flex-basis: 100%; color: var(--ink-2); }
+.qcard .q-status b { color: var(--ink); font-weight: 600; }
+.qscroll { overflow: auto; flex: 1; min-height: 0; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+th {
+  position: sticky; top: 0; z-index: 1;
+  text-align: right; font-weight: 500; font-size: 11px; color: var(--ink-3);
+  padding: 5px 5px; background: var(--surface); border-bottom: 1px solid var(--hair); white-space: nowrap;
+}
+th:first-child, td:first-child { text-align: left; padding-left: 12px; }
+th:last-child, td:last-child { padding-right: 12px; }
+td { text-align: right; padding: 4px 5px; border-bottom: 1px solid var(--hair); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+tbody tr:hover, tbody tr.hl { background: var(--surface-2); }
+.u { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.u svg { width: 8px; height: 8px; flex: none; }
+.u .from { font-weight: 400; font-size: 11px; color: var(--ink-3); }
+/* Узкая карточка: сначала прячется «освободит» (начало + 230 с, есть в подсказке строки), затем метка «из S2». */
+@container (max-width: 372px) { .c-free { display: none; } }
+@container (max-width: 312px) { .u .from { display: none; } }
+.c-free { color: var(--ink-2); }
+.w0 { color: var(--ink-3); }
+.wpos { font-weight: 600; }
+.qfoot { padding: 6px 14px 8px; color: var(--ink-3); border-top: 1px solid var(--hair); font-variant-numeric: tabular-nums; }
+.dim { opacity: 0.55; transition: opacity 200ms ease-out; }
+
+/* Узкие экраны: одна колонка, страница прокручивается */
+@media (max-width: 1100px) {
+  .app { height: auto; }
+  .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+  .map-panel { height: 460px; }
+  .feed-panel { height: 340px; }
+  .queues { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .qcard { max-height: 360px; }
+}
+@media (max-width: 720px) {
+  .top { flex-wrap: wrap; gap: 8px 16px; }
+  .now { margin-left: 0; }
+  .health { flex-direction: column; }
+  .hgroup { border-left: 0; padding: 2px 10px; }
+  .queues { grid-template-columns: minmax(0, 1fr); }
+  .map-panel { height: 400px; }
+  .map-panel .panel-head { flex-wrap: wrap; }
+  .map-marks { order: 3; flex-basis: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dec.fresh { animation: none; }
+  .dim { transition: none; }
+}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <header class="top">
+    <div class="title">
+      <h1>Виртуальные очереди</h1>
+      <span class="muted" id="site">площадка —</span>
+    </div>
+    <div class="now" title="«Сейчас» процессора — время событий из телеметрии, не часы компьютера">
+      <span class="now-label">Сейчас</span>
+      <span class="now-time" id="now-time">—</span>
+      <span class="now-date" id="now-date"></span>
+    </div>
+    <div class="sources" id="sources" aria-label="Источники данных"></div>
+    <button class="icon-btn" id="theme" type="button" title="Светлая или тёмная тема" aria-label="Переключить тему">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/></svg>
+    </button>
+  </header>
+  <div class="banner" id="banner" role="status" hidden></div>
+  <section class="health" id="health" aria-label="Здоровье конвейера"></section>
+  <main class="layout">
+    <section class="panel map-panel" id="map-panel">
+      <div class="panel-head">
+        <h2>Карта</h2>
+        <span class="map-marks" id="map-marks" title="queue.v1 публикуется только при изменении очереди: первая отметка — offset сообщения telemetry.v1, которое последним изменило очередь, вторая — срез Postgres (next_offset − 1). Если очередь изменилась позже среза, очереди опережают карту — не больше чем на пачку: dispatcher отправляет выходы до чекпоинта"></span>
+        <div class="seg" role="group" aria-label="Масштаб карты">
+          <button type="button" data-view="stations" aria-pressed="true">Станции</button>
+          <button type="button" data-view="site" aria-pressed="false">Весь участок</button>
+        </div>
+      </div>
+      <div class="map-wrap" id="map-wrap">
+        <svg id="map" role="img" aria-label="Карта площадки: станции, разгрузка и машины">
+          <g id="g-base"></g><g id="g-links"></g><g id="g-veh"></g><g id="g-st"></g><g id="g-ov"></g>
+        </svg>
+        <div class="map-note" id="map-note" hidden></div>
+        <div class="tip" id="tip" hidden></div>
+      </div>
+      <div class="legend" aria-label="Легенда">
+        <span><svg viewBox="0 0 14 10"><circle cx="7" cy="5" r="4" fill="var(--s-to-station)"/></svg>к станции</span>
+        <span title="Ждущие показаны цепочкой справа от станции, по времени приезда"><svg viewBox="0 0 22 10" style="width:22px"><circle cx="4" cy="5" r="3" fill="var(--s-waiting)"/><circle cx="11" cy="5" r="3" fill="var(--s-waiting)"/><circle cx="18" cy="5" r="3" fill="var(--s-waiting)"/></svg>ждёт</span>
+        <span><svg viewBox="0 0 14 10"><circle cx="7" cy="5" r="4" fill="var(--s-service)"/></svg>обслуживание</span>
+        <span><svg viewBox="0 0 14 10"><circle cx="7" cy="5" r="3.2" fill="none" stroke="var(--s-service)" stroke-width="1.6"/></svg>выезжает</span>
+        <span><svg viewBox="0 0 14 10"><circle cx="7" cy="5" r="4" fill="var(--s-to-dump)"/></svg>к разгрузке</span>
+        <span><svg viewBox="0 0 14 10"><line x1="0" y1="5" x2="14" y2="5" stroke="var(--s-to-station)" stroke-width="1.5" stroke-dasharray="4 3"/></svg>перенаправлена</span>
+        <span><svg viewBox="0 0 14 10"><circle cx="7" cy="5" r="4" fill="var(--s-to-station)" opacity="0.35"/></svg>нет свежей позиции</span>
+      </div>
+    </section>
+    <section class="panel feed-panel" aria-labelledby="feed-title">
+      <div class="panel-head"><h2 id="feed-title">Решения</h2><span class="muted num" id="feed-totals"></span></div>
+      <ol class="feed" id="feed"></ol>
+    </section>
+    <section class="queues" id="queues" aria-label="Очереди станций"></section>
+  </main>
+</div>
+<script>
+(() => {
+  'use strict';
+
+  const POLL_MS = 500;
+  const POLL_HIDDEN_MS = 2000;
+  const ANIM_MS = 480;
+  const EARTH_R = 6371008.8;
+  const RAD = Math.PI / 180;
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  const PHASES = {
+    to_station: 'к станции',
+    waiting: 'ждёт',
+    service: 'обслуживание',
+    served: 'обслужена, выезжает',
+    to_dump: 'к разгрузке',
+  };
+  const REASONS = { no_gain: 'нет выигрыша', stale_telemetry: 'устаревшая позиция' };
+  const SOURCES = [['kafka', 'Kafka'], ['postgres', 'Postgres'], ['dispatcher', 'dispatcher'], ['generator', 'генератор']];
+  const MONTHS = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const nf = new Intl.NumberFormat('ru-RU');
+  const pf = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
+
+  const $ = (id) => document.getElementById(id);
+
+  // --- DOM-помощники: данные из топиков вставляются только как текст ---
+  function el(tag, attrs, ...kids) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v == null || v === false) continue;
+      if (k === 'class') node.className = v;
+      else if (k === 'text') node.textContent = v;
+      else node.setAttribute(k, v === true ? '' : v);
+    }
+    for (const kid of kids) if (kid != null) node.append(kid);
+    return node;
+  }
+  function sv(tag, attrs, ...kids) {
+    const node = document.createElementNS(SVGNS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v == null) continue;
+      if (k === 'text') node.textContent = v;
+      else node.setAttribute(k, v);
+    }
+    for (const kid of kids) if (kid != null) node.append(kid);
+    return node;
+  }
+  function icon(kind) {
+    // Нарисованные значки одного веса: статус всегда идёт вместе с подписью.
+    const svg = sv('svg', { viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6',
+      'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' });
+    if (kind === 'good') svg.append(sv('circle', { cx: 8, cy: 8, r: 6.5 }), sv('path', { d: 'M5.2 8.2l1.9 1.9 3.8-4' }));
+    else if (kind === 'bad') svg.append(sv('circle', { cx: 8, cy: 8, r: 6.5 }), sv('path', { d: 'M5.8 5.8l4.4 4.4M10.2 5.8l-4.4 4.4' }));
+    else if (kind === 'done') svg.append(sv('circle', { cx: 8, cy: 8, r: 6.5 }), sv('path', { d: 'M5.5 8h5' }));
+    else if (kind === 'redirect') svg.append(sv('path', { d: 'M2.5 12.5V8.5a3 3 0 0 1 3-3h8' }), sv('path', { d: 'M10.5 2.5l3 3-3 3' }));
+    else if (kind === 'reject') svg.append(sv('circle', { cx: 8, cy: 8, r: 3.2 }));
+    else svg.append(sv('circle', { cx: 8, cy: 8, r: 6.5 }));
+    return svg;
+  }
+  function phaseDot(phase) {
+    const svg = sv('svg', { viewBox: '0 0 8 8', 'aria-hidden': 'true' });
+    const color = { to_station: '--s-to-station', waiting: '--s-waiting', service: '--s-service', served: '--s-service', to_dump: '--s-to-dump' }[phase] || '--s-to-dump';
+    if (phase === 'served') svg.append(sv('circle', { cx: 4, cy: 4, r: 3, fill: 'none', stroke: `var(${color})`, 'stroke-width': 1.5 }));
+    else svg.append(sv('circle', { cx: 4, cy: 4, r: 4, fill: `var(${color})` }));
+    return svg;
+  }
+
+  // --- форматирование ---
+  const fmtN = (x) => (x == null ? '—' : nf.format(x));
+  const hms = (iso) => (typeof iso === 'string' && iso.length >= 19 ? iso.slice(11, 19) : '—');
+  const secs = (x) => (x == null ? '—' : `${nf.format(x)} с`);
+  function dayLabel(iso) {
+    if (typeof iso !== 'string' || iso.length < 10) return '';
+    const m = Number(iso.slice(5, 7));
+    return `${Number(iso.slice(8, 10))} ${MONTHS[m - 1] || ''} ${iso.slice(0, 4)}, UTC`;
+  }
+  function ago(s) {
+    if (s == null) return '—';
+    if (s < 1) return 'только что';
+    if (s < 90) return `${pf.format(s)} с назад`;
+    return `${nf.format(Math.round(s / 60))} мин назад`;
+  }
+  function plural(n, one, few, many) {
+    const a = Math.abs(n) % 100, b = a % 10;
+    if (a > 10 && a < 20) return many;
+    if (b > 1 && b < 5) return few;
+    return b === 1 ? one : many;
+  }
+
+  // --- тема ---
+  const root = document.documentElement;
+  try { const t = localStorage.getItem('vq-theme'); if (t === 'light' || t === 'dark') root.dataset.theme = t; } catch (e) { /* без хранилища */ }
+  const themeParam = new URLSearchParams(location.search).get('theme');  // ?theme=light для показа на проекторе
+  if (themeParam === 'light' || themeParam === 'dark') root.dataset.theme = themeParam;
+  $('theme').addEventListener('click', () => {
+    const dark = root.dataset.theme ? root.dataset.theme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    root.dataset.theme = dark ? 'light' : 'dark';
+    try { localStorage.setItem('vq-theme', root.dataset.theme); } catch (e) { /* без хранилища */ }
+  });
+
+  // --- карта: локальная равнопромежуточная проекция ---
+  const map = {
+    svg: $('map'), wrap: $('map-wrap'), base: $('g-base'), links: $('g-links'), veh: $('g-veh'), st: $('g-st'), ov: $('g-ov'),
+    view: 'stations', key: '', w: 0, h: 0, lat0: 0, lon0: 0, px: null, ovPx: null, stations: [], dump: null,
+    stationPx: new Map(), vehicles: new Map(), anim: { t0: 0, raf: 0 }, hover: null,
+  };
+  try { const v = localStorage.getItem('vq-map-view'); if (v === 'site' || v === 'stations') map.view = v; } catch (e) { /* без хранилища */ }
+  const viewParam = new URLSearchParams(location.search).get('view');
+  if (viewParam === 'site' || viewParam === 'stations') map.view = viewParam;
+
+  function project(lat, lon) {
+    return [(lon - map.lon0) * Math.cos(map.lat0 * RAD) * EARTH_R * RAD, (lat - map.lat0) * EARTH_R * RAD];
+  }
+  function boundsOf(points, margin) {
+    const b = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+    for (const [p, m] of points) {
+      b.x0 = Math.min(b.x0, p[0] - m); b.x1 = Math.max(b.x1, p[0] + m);
+      b.y0 = Math.min(b.y0, p[1] - m); b.y1 = Math.max(b.y1, p[1] + m);
+    }
+    return b;
+  }
+  function fitter(b, x, y, w, h) {
+    const s = Math.min(w / (b.x1 - b.x0), h / (b.y1 - b.y0));
+    const ox = x + (w - (b.x1 - b.x0) * s) / 2;
+    const oy = y + (h - (b.y1 - b.y0) * s) / 2;
+    const f = (p) => [ox + (p[0] - b.x0) * s, oy + (b.y1 - p[1]) * s];
+    f.scale = s;
+    f.bounds = b;
+    return f;
+  }
+  function niceLength(maxM) {
+    for (const m of [10000, 5000, 2000, 1000, 500, 200, 100]) if (m <= maxM) return m;
+    return 100;
+  }
+
+  function layoutMap(state) {
+    const st = state.stations || [];
+    const dump = state.site && state.site.dump;
+    const w = map.wrap.clientWidth, h = map.wrap.clientHeight;
+    const key = JSON.stringify([st.map((s) => [s.uuid, s.lat, s.lon]), dump, w, h, map.view]);
+    if (key === map.key || !dump || !st.length || w < 40 || h < 40) return false;
+    map.key = key; map.w = w; map.h = h;
+    map.svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    const pts = st.map((s) => [s.lat, s.lon]).concat([[dump.lat, dump.lon]]);
+    map.lat0 = pts.reduce((a, p) => a + p[0], 0) / pts.length;
+    map.lon0 = pts.reduce((a, p) => a + p[1], 0) / pts.length;
+    map.stations = st.map((s) => ({ uuid: s.uuid, m: project(s.lat, s.lon) }));
+    map.dump = project(dump.lat, dump.lon);
+    const zone = (state.site && state.site.decision_radius_m) || 1500;
+    const radius = (state.site && state.site.radius_m) || 50;
+    const stationPts = map.stations.map((s) => [s.m, zone + 160]);
+    const siteBounds = boundsOf(stationPts.concat([[map.dump, 450]]), 0);
+    const pad = 18;
+    if (map.view === 'site') map.px = fitter(siteBounds, pad, pad, w - 2 * pad, h - 2 * pad);
+    else map.px = fitter(boundsOf(map.stations.map((s) => [s.m, zone + 60]), 0), pad, pad + 10, w - 2 * pad, h - 2 * pad - 10);
+    map.stationPx = new Map(map.stations.map((s) => [s.uuid, map.px(s.m)]));
+
+    // Статичный слой: дороги, зоны решения, радиусы, разгрузка, масштаб.
+    const base = map.base;
+    base.replaceChildren();
+    const dumpPx = map.px(map.dump);
+    for (const s of map.stations) {
+      const p = map.px(s.m);
+      base.append(sv('line', { class: 'road', x1: dumpPx[0], y1: dumpPx[1], x2: p[0], y2: p[1] }));
+    }
+    for (const s of map.stations) {
+      const p = map.px(s.m);
+      base.append(sv('circle', { class: 'zone', cx: p[0], cy: p[1], r: zone * map.px.scale }));
+    }
+    for (const s of map.stations) {
+      const p = map.px(s.m);
+      base.append(sv('circle', { class: 'radius', cx: p[0], cy: p[1], r: Math.max(radius * map.px.scale, 5) }));
+      base.append(sv('circle', { class: 'station-dot', cx: p[0], cy: p[1], r: 1.6 }));
+    }
+    const dr = Math.max(radius * map.px.scale, 5);
+    if (dumpPx[1] > -20 && dumpPx[1] < h + 20) {
+      base.append(sv('rect', { class: 'dump-mark', x: dumpPx[0] - dr, y: dumpPx[1] - dr, width: 2 * dr, height: 2 * dr,
+        transform: `rotate(45 ${dumpPx[0]} ${dumpPx[1]})` }));
+      base.append(sv('text', { class: 'lbl lbl-halo', x: dumpPx[0] + dr + 8, y: dumpPx[1] + 4, text: 'Разгрузка' }));
+    }
+    const len = niceLength(110 / map.px.scale);
+    const bar = len * map.px.scale;
+    const sx = 16, sy = h - 14;
+    base.append(sv('g', { class: 'scale' },
+      sv('line', { x1: sx, y1: sy, x2: sx + bar, y2: sy }),
+      sv('line', { x1: sx, y1: sy - 4, x2: sx, y2: sy }),
+      sv('line', { x1: sx + bar, y1: sy - 4, x2: sx + bar, y2: sy }),
+      sv('text', { x: sx + bar + 6, y: sy + 4, text: len >= 1000 ? `${len / 1000} км` : `${len} м` })));
+
+    // Обзор всего участка в углу — только в масштабе станций.
+    map.ov.replaceChildren();
+    map.ovPx = null;
+    if (map.view === 'stations' && w > 520) {
+      const ow = 92, oh = Math.min(150, Math.round(92 * (siteBounds.y1 - siteBounds.y0) / (siteBounds.x1 - siteBounds.x0)));
+      const ox = w - ow - 10, oy = 10;
+      map.ovPx = fitter(siteBounds, ox + 6, oy + 6, ow - 12, oh - 12);
+      map.ov.append(sv('rect', { class: 'ov-frame', x: ox, y: oy, width: ow, height: oh, rx: 6 }));
+      const od = map.ovPx(map.dump);
+      for (const s of map.stations) {
+        const p = map.ovPx(s.m);
+        map.ov.append(sv('line', { class: 'ov-road', x1: od[0], y1: od[1], x2: p[0], y2: p[1] }));
+      }
+      const vb = map.px.bounds;
+      const a = map.ovPx([vb.x0, vb.y1]), c = map.ovPx([vb.x1, vb.y0]);
+      map.ov.append(sv('rect', { class: 'ov-window', x: a[0], y: a[1], width: c[0] - a[0], height: c[1] - a[1], rx: 2 }));
+      map.ov.append(sv('rect', { class: 'dump-mark', x: od[0] - 2.5, y: od[1] - 2.5, width: 5, height: 5, transform: `rotate(45 ${od[0]} ${od[1]})` }));
+      map.ov.append(sv('g', { id: 'g-ov-dots' }));
+    }
+    return true;
+  }
+
+  // Позиция машины на карте: ждущие выстраиваются цепочкой справа от станции, занявшая — в центре.
+  function vehicleTargets(state) {
+    const out = new Map();
+    const queues = new Map();
+    for (const v of state.vehicles || []) {
+      if (v.phase === 'waiting' && map.stationPx.has(v.target)) {
+        if (!queues.has(v.target)) queues.set(v.target, []);
+        queues.get(v.target).push(v);
+      }
+    }
+    for (const list of queues.values()) list.sort((a, b) => (a.arrived_at ?? 0) - (b.arrived_at ?? 0) || (a.unit < b.unit ? -1 : 1));
+    const occupants = new Map((state.stations || []).filter((s) => s.occupant).map((s) => [s.occupant, s.uuid]));
+    for (const v of state.vehicles || []) {
+      if (typeof v.lat !== 'number' || typeof v.lon !== 'number') continue;
+      let p;
+      if (v.phase === 'waiting' && queues.has(v.target)) {
+        const i = queues.get(v.target).indexOf(v);
+        const c = map.stationPx.get(v.target);
+        const radiusPx = Math.max(((state.site && state.site.radius_m) || 50) * map.px.scale, 5);
+        p = [c[0] + radiusPx + 8 + (i % 8) * 10, c[1] + Math.floor(i / 8) * 10];
+      } else if (v.phase === 'service' && occupants.get(v.unit) && map.stationPx.has(occupants.get(v.unit))) {
+        p = map.stationPx.get(occupants.get(v.unit));
+      } else {
+        p = map.px(project(v.lat, v.lon));
+      }
+      out.set(v.unit, p);
+    }
+    return out;
+  }
+
+  function renderVehicles(state, relayout) {
+    const targets = vehicleTargets(state);
+    const now = performance.now();
+    const k = Math.min(1, (now - map.anim.t0) / ANIM_MS);
+    const seen = new Set();
+    for (const v of state.vehicles || []) {
+      const to = targets.get(v.unit);
+      if (!to) continue;
+      seen.add(v.unit);
+      let rec = map.vehicles.get(v.unit);
+      if (!rec) {
+        const g = sv('g', { class: 'veh', 'data-unit': v.unit });
+        const hit = sv('circle', { class: 'hit', r: 12 });
+        const ring = sv('circle', { class: 'ring', r: 7.5 });
+        const dot = sv('circle', { class: 'dot', r: 4.5 });
+        g.append(hit, ring, dot);
+        g.addEventListener('pointerenter', () => showTip(v.unit));
+        g.addEventListener('pointerleave', hideTip);
+        map.veh.append(g);
+        rec = { g, dot, from: to, to, cur: to, link: null };
+        map.vehicles.set(v.unit, rec);
+      }
+      rec.from = relayout || reduceMotion.matches ? to : lerp(rec.from, rec.to, k);
+      rec.to = to;
+      rec.data = v;
+      rec.g.setAttribute('class', `veh p-${v.phase}${v.fresh ? '' : ' stale'}${map.hover === v.unit ? ' hl' : ''}`);
+      const redirect = v.redirected && (v.phase === 'to_station' || v.phase === 'waiting') && map.stationPx.has(v.target);
+      if (redirect && !rec.link) { rec.link = sv('line', { class: 'link' }); map.links.append(rec.link); }
+      if (!redirect && rec.link) { rec.link.remove(); rec.link = null; }
+    }
+    for (const [unit, rec] of map.vehicles) {
+      if (seen.has(unit)) continue;
+      rec.g.remove();
+      if (rec.link) rec.link.remove();
+      map.vehicles.delete(unit);
+    }
+    map.anim.t0 = now;
+    if (!map.anim.raf) map.anim.raf = requestAnimationFrame(frame);
+
+    // Мини-обзор: точки без анимации.
+    const dots = document.getElementById('g-ov-dots');
+    if (dots && map.ovPx) {
+      dots.replaceChildren();
+      for (const v of state.vehicles || []) {
+        if (typeof v.lat !== 'number') continue;
+        const p = map.ovPx(project(v.lat, v.lon));
+        const color = { to_station: '--s-to-station', waiting: '--s-waiting', service: '--s-service', served: '--s-service' }[v.phase] || '--s-to-dump';
+        dots.append(sv('circle', { class: 'ov-dot', cx: p[0], cy: p[1], r: 1.6, fill: `var(${color})`, opacity: v.fresh ? 1 : 0.4 }));
+      }
+    }
+  }
+  function lerp(a, b, k) { return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k]; }
+  function frame() {
+    map.anim.raf = 0;
+    const k = reduceMotion.matches ? 1 : Math.min(1, (performance.now() - map.anim.t0) / ANIM_MS);
+    for (const rec of map.vehicles.values()) {
+      const p = lerp(rec.from, rec.to, k);
+      rec.cur = p;
+      rec.g.setAttribute('transform', `translate(${p[0].toFixed(1)} ${p[1].toFixed(1)})`);
+      if (rec.link) {
+        const t = map.stationPx.get(rec.data.target);
+        rec.link.setAttribute('x1', p[0].toFixed(1)); rec.link.setAttribute('y1', p[1].toFixed(1));
+        rec.link.setAttribute('x2', t[0].toFixed(1)); rec.link.setAttribute('y2', t[1].toFixed(1));
+      }
+    }
+    if (map.hover) placeTip(map.hover);
+    if (k < 1) map.anim.raf = requestAnimationFrame(frame);
+  }
+
+  function renderStationLabels(state) {
+    // На карте — только имя станции: занятость и очередь подробно показаны в карточках ниже.
+    map.st.replaceChildren();
+    const radiusPx = Math.max(((state.site && state.site.radius_m) || 50) * map.px.scale, 5);
+    for (const s of state.stations || []) {
+      const p = map.stationPx.get(s.uuid);
+      if (!p) continue;
+      map.st.append(sv('text', { class: 'lbl lbl-halo', x: p[0], y: p[1] - radiusPx - 7, 'text-anchor': 'middle', text: s.uuid }));
+    }
+  }
+
+  // --- подсказка у машины ---
+  const tip = $('tip');
+  function showTip(unit) {
+    setHover(unit);
+  }
+  function hideTip() {
+    setHover(null);
+    tip.hidden = true;
+  }
+  function placeTip(unit) {
+    const rec = map.vehicles.get(unit);
+    if (!rec || !rec.data) { tip.hidden = true; return; }
+    const v = rec.data;
+    const where = v.target && v.target !== v.home ? `цель ${v.target}, своя ${v.home}` : `своя ${v.home || '—'}`;
+    tip.replaceChildren(
+      el('strong', { text: v.unit }),
+      el('span', { text: `${PHASES[v.phase] || v.phase} · ${where}` }),
+      el('span', { class: 'num', text: `${v.speed_kmh != null ? pf.format(v.speed_kmh) : '—'} км/ч · позиция ${v.age_s != null ? ago(v.age_s) : '—'}` }));
+    tip.hidden = false;
+    const p = rec.cur || rec.to;
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    let x = p[0] + 14, y = p[1] - th - 10;
+    if (x + tw > map.w - 6) x = p[0] - tw - 14;
+    if (y < 6) y = p[1] + 14;
+    tip.style.left = `${Math.max(6, x)}px`;
+    tip.style.top = `${Math.max(6, y)}px`;
+  }
+  function setHover(unit) {
+    if (map.hover === unit) return;
+    const prev = map.hover;
+    map.hover = unit;
+    if (unit) placeTip(unit); else tip.hidden = true;
+    for (const u of [prev, unit]) {
+      if (!u) continue;
+      const rec = map.vehicles.get(u);
+      if (rec) rec.g.classList.toggle('hl', u === unit);
+      for (const row of document.querySelectorAll(`[data-unit="${CSS.escape(u)}"]`)) {
+        if (row.tagName !== 'g') row.classList.toggle('hl', u === unit);
+      }
+    }
+  }
+  function hoverable(node, unit) {
+    node.dataset.unit = unit;
+    node.addEventListener('pointerenter', () => setHover(unit));
+    node.addEventListener('pointerleave', () => setHover(null));
+    node.addEventListener('focus', () => setHover(unit));
+    node.addEventListener('blur', () => setHover(null));
+  }
+
+  // --- шапка, источники, баннер ---
+  function renderHeader(state) {
+    $('site').textContent = `площадка ${state.site ? state.site.id : '—'}`;
+    $('now-time').textContent = hms(state.now_iso);
+    $('now-date').textContent = dayLabel(state.now_iso);
+    const box = $('sources');
+    box.replaceChildren();
+    const src = state.sources || {};
+    const notes = [];
+    for (const [key, name] of SOURCES) {
+      const s = src[key] || { ok: false, error: 'нет данных' };
+      let kind = s.ok ? 'good' : 'bad';
+      let label = name;
+      let title = s.ok ? `${name}: работает, обновлено ${ago(s.age_s)}` : `${name}: ${s.error || 'недоступен'}`;
+      if (key === 'generator' && !s.ok) {
+        const summary = src.summary || {};
+        kind = summary.ok ? 'done' : 'idle';
+        label = summary.ok ? 'генератор: итог прогона' : 'генератор не запущен';
+        title = summary.ok ? 'Генератор завершил прогон; ожидаемые отбросы взяты из summary.json' : `генератор: ${s.error || 'недоступен'}`;
+      }
+      if (key === 'dispatcher' && !s.ok) kind = 'idle';
+      const pill = el('span', { class: `pill${s.ok ? '' : ' down'}`, title });
+      const ic = icon(kind);
+      ic.classList.add(kind === 'good' ? 'ico-good' : kind === 'bad' ? 'ico-bad' : 'ico-idle');
+      pill.append(ic, el('span', { text: label }));
+      box.append(pill);
+      if (!s.ok && (key === 'kafka' || key === 'postgres')) {
+        const what = key === 'kafka' ? 'очереди и решения — последние полученные' : 'карта и счётчики — последний срез';
+        notes.push(`${name} недоступен (${s.error || 'нет ответа'}): ${what}${s.age_s != null ? `, ${ago(s.age_s)}` : ''}.`);
+      }
+    }
+    setBanner(notes);
+  }
+  let offlineSince = null;
+  function setBanner(notes) {
+    const all = offlineSince ? [`Витрина не отвечает с ${new Date(offlineSince).toLocaleTimeString('ru-RU')}: показано последнее полученное состояние.`].concat(notes) : notes;
+    const banner = $('banner');
+    banner.replaceChildren(...all.map((t) => {
+      const ic = icon('bad'); ic.classList.add('ico-bad');
+      return el('div', { class: 'banner-row' }, ic, el('span', { text: t }));
+    }));
+    banner.hidden = all.length === 0;
+  }
+
+  // --- полоса здоровья ---
+  function kv(k, v, title) {
+    return el('span', { class: 'kv', title }, el('span', { class: 'k', text: k }), el('span', { class: 'v', text: v }));
+  }
+  function group(name, ...items) {
+    return el('div', { class: 'hgroup' }, el('span', { class: 'hgroup-name', text: name }), ...items);
+  }
+  function renderHealth(state) {
+    const h = state.health || {};
+    const c = h.counters;
+    const out = [];
+    const drops = [];
+    if (h.expected_drops != null) {
+      const srcName = h.expected_drops_source === 'summary' ? 'по итогу прогона' : 'по генератору';
+      drops.push(kv('ожидалось', fmtN(h.expected_drops), `Ожидаемые отбросы ${srcName}`));
+      // Отметка — только при совпадении: пока генератор работает, dispatcher отстаёт на сообщения в пути,
+      // а после старта с --allow-dirty счётчик processor включает отбросы прошлых прогонов.
+      if (h.drops_match === true) {
+        const ic = icon('good'); ic.classList.add('ico-good');
+        drops.push(el('span', { class: 'badge' }, ic, el('span', { text: 'совпадает' })));
+      }
+    }
+    out.push(group('Телеметрия',
+      kv('принято', fmtN(c && c.accepted)),
+      kv('отброшено', fmtN(c && c.not_newer), 'Дубли и сообщения не новее последнего учтённого ts машины'),
+      ...drops,
+      kv('невалидно', fmtN(c && c.invalid))));
+    const d = h.decisions;
+    out.push(group('Решения',
+      kv('рекомендовано', fmtN(d && d.recommended), 'Счётчики dispatcher с момента запуска процесса'),
+      kv('нет выигрыша', fmtN(d && d.no_gain)),
+      kv('устаревшая позиция', fmtN(d && d.stale_telemetry))));
+    const p = h.prediction;
+    const share = p && p.within_5s != null ? `${pf.format(p.within_5s * 100)} %` : '—';
+    out.push(group('Прогноз',
+      kv('|ошибка| ≤ 5 с', share, 'Доля занятий, где фактическое начало обслуживания отличается от предсказанного не больше чем на 5 с; счётчики dispatcher с момента запуска процесса, квантили — в Grafana'),
+      kv('занятий', fmtN(p && p.count))));
+    out.push(group('Процессор',
+      kv('epoch', fmtN(h.epoch)),
+      kv('next_offset', fmtN(h.next_offset)),
+      kv('чекпоинт', ago(h.updated_age_s), h.updated_at || ''),
+      kv('лаг', fmtN(h.consumer_lag), 'Отставание consumer dispatcher, сообщений'),
+      kv('самолечение', fmtN(h.resync), 'Самолечение и конец заезда «к станции» в радиусе разгрузки; при послушном генераторе 0')));
+    $('health').replaceChildren(...out);
+    const marks = h.marks || {};
+    const reps = h.stream && h.stream.repeats;
+    const repN = reps ? (reps['queue.v1'] || 0) + (reps['decision.v1'] || 0) : null;
+    $('map-marks').textContent = `${marks.text || ''}${repN ? ` · повторов отброшено ${fmtN(repN)}` : ''}`;
+  }
+
+  // --- очереди станций ---
+  function renderQueues(state) {
+    const box = $('queues');
+    const phaseOf = new Map((state.vehicles || []).map((v) => [v.unit, v.phase]));
+    const cards = [];
+    const kafkaOk = state.sources && state.sources.kafka && state.sources.kafka.ok;
+    for (const s of state.stations || []) {
+      const q = s.queue;
+      const rows = (q && q.rows) || [];
+      const card = el('section', { class: `panel qcard${kafkaOk ? '' : ' dim'}`, 'aria-label': `Очередь ${s.uuid}` });
+      const occupant = s.occupant || (rows[0] && rows[0].eta === null ? rows[0].unit_uuid : null);
+      const freeAt = s.free_at != null ? isoOf(s.free_at) : rows[0] && rows[0].unit_uuid === occupant ? rows[0].free_at : null;
+      const status = el('div', { class: 'q-status' });
+      if (occupant) status.append('занята ', el('b', { text: occupant }), ` до ${hms(freeAt)}`);
+      else status.append('свободна');
+      const waitingN = rows.filter((r) => r.unit_uuid !== occupant).length;
+      card.append(el('div', { class: 'panel-head' },
+        el('h2', { text: s.uuid }),
+        el('span', { class: 'muted num', text: `в очереди ${waitingN} · своих ${s.assigned}` }),
+        status));
+      const scroll = el('div', { class: 'qscroll' });
+      if (!q) {
+        scroll.append(el('div', { class: 'empty' }, el('strong', { text: 'Нет записи в queue.v1' }), 'Очередь появится после первого сообщения телеметрии.'));
+      } else if (!rows.length) {
+        scroll.append(el('div', { class: 'empty' }, el('strong', { text: 'Очередь пуста' }), 'Никто не едет к станции в горизонте 30 минут.'));
+      } else {
+        const tbody = el('tbody');
+        rows.forEach((r, i) => {
+          let phase = phaseOf.get(r.unit_uuid);
+          if (r.eta === null) phase = i === 0 && r.unit_uuid === occupant ? 'service' : 'waiting';
+          else if (phase !== 'to_dump') phase = 'to_station';
+          const unit = el('span', { class: 'u' }, phaseDot(phase), el('span', { text: r.unit_uuid }));
+          if (r.home && r.home !== s.uuid) unit.append(el('span', { class: 'from', text: `из ${r.home}`, title: `Перенаправлена со своей станции ${r.home}` }));
+          const wait = el('td', { class: r.wait_seconds > 0 ? 'wpos' : 'w0', text: secs(r.wait_seconds) });
+          const tr = el('tr', { tabindex: '0', title: `${r.unit_uuid}: начало ${hms(r.service_start)}, освободит ${hms(r.free_at)}` },
+            el('td', {}, unit),
+            el('td', { text: r.eta === null ? '—' : hms(r.eta), title: r.eta === null ? 'Уже на станции' : null }),
+            el('td', {}, hms(r.service_start), el('span', { class: 'c-free', text: `–${hms(r.free_at)}` })),
+            wait);
+          hoverable(tr, r.unit_uuid);
+          if (map.hover === r.unit_uuid) tr.classList.add('hl');
+          tbody.append(tr);
+        });
+        scroll.append(el('table', {},
+          el('thead', {}, el('tr', {},
+            el('th', { text: 'машина' }), el('th', { text: 'приезд' }),
+            el('th', { title: 'Начало обслуживания и момент, когда машина освободит станцию' }, 'обслуживание'),
+            el('th', { text: 'ожидание' }))),
+          tbody));
+      }
+      card.append(scroll);
+      card.append(el('div', { class: 'qfoot', text: q ? `изменение в ${hms(q.at)} · offset ${fmtN(q.src_offset)}` : 'ждём queue.v1',
+        title: q ? 'Время события и offset сообщения telemetry.v1, которое последним изменило эту очередь' : null }));
+      cards.push(card);
+    }
+    // Сохраняем прокрутку карточек при перерисовке.
+    const scrolls = [...box.querySelectorAll('.qscroll')].map((n) => n.scrollTop);
+    box.replaceChildren(...cards);
+    box.querySelectorAll('.qscroll').forEach((n, i) => { n.scrollTop = scrolls[i] || 0; });
+  }
+  function isoOf(ts) { return new Date(ts * 1000).toISOString().slice(0, 19) + 'Z'; }
+
+  // --- лента решений ---
+  const feed = { keys: [], first: true };
+  function decisionKey(d) { return `${d.unit_uuid}|${d.at}`; }
+  function decisionNode(d, fresh) {
+    const rec = d.result === 'recommended';
+    const ic = icon(rec ? 'redirect' : 'reject');
+    const what = rec ? `${d.from_station} → ${d.to_station}` : `отказ: ${REASONS[d.reason] || d.reason || '—'}`;
+    const li = el('li', { class: `dec ${rec ? 'rec' : 'rej'}${fresh ? ' fresh' : ''}`, tabindex: '0', title: `vq-src-offset ${d.src_offset}` },
+      el('span', { class: 'dec-time', text: hms(d.at) }),
+      el('span', { class: 'dec-icon' }, ic),
+      el('span', { class: 'dec-unit', text: d.unit_uuid }),
+      el('span', { class: 'dec-what' }, what, rec ? el('span', { class: 'dec-gain', text: ` · выигрыш ${secs(d.gain_seconds)}` }) : null));
+    hoverable(li, d.unit_uuid);
+    return li;
+  }
+  function renderFeed(state) {
+    const list = $('feed');
+    const ds = (state.decisions || []).slice(0, 120);
+    const keys = ds.map(decisionKey);
+    const totals = (state.health && state.health.stream && state.health.stream.decision_totals) || {};
+    const rec = totals.recommended || 0;
+    const rej = (totals.no_gain || 0) + (totals.stale_telemetry || 0);
+    $('feed-totals').textContent = rec + rej ? `в логе ${fmtN(rec)} ${plural(rec, 'рекомендация', 'рекомендации', 'рекомендаций')} и ${fmtN(rej)} ${plural(rej, 'отказ', 'отказа', 'отказов')}` : '';
+    const same = keys.length === feed.keys.length && keys.every((k, i) => k === feed.keys[i]);
+    if (same && !feed.first) return;
+    if (!ds.length) {
+      list.replaceChildren(el('li', { class: 'empty' }, el('strong', { text: 'Решений пока нет' }),
+        'Решение принимается, когда машина впервые подъезжает ближе 1500 м к своей станции.'));
+    } else {
+      const old = new Set(feed.keys);
+      const known = feed.first ? new Set(keys) : old;
+      const existing = new Map([...list.querySelectorAll('li.dec')].map((n) => [n.dataset.key, n]));
+      const nodes = ds.map((d) => {
+        const key = decisionKey(d);
+        let node = existing.get(key);
+        if (!node) { node = decisionNode(d, !known.has(key)); node.dataset.key = key; }
+        return node;
+      });
+      list.replaceChildren(...nodes);
+    }
+    feed.keys = keys;
+    feed.first = false;
+  }
+
+  // --- карта целиком ---
+  function renderMap(state) {
+    const relayout = layoutMap(state);
+    if (!map.px) return;
+    renderVehicles(state, relayout);
+    renderStationLabels(state);
+    const note = $('map-note');
+    const pg = state.sources && state.sources.postgres;
+    if (!(state.vehicles || []).length) {
+      note.textContent = pg && pg.ok ? 'Машины появятся после первого чекпоинта dispatcher.' : 'Нет среза Postgres: машины не показаны.';
+      note.hidden = false;
+    } else {
+      note.hidden = true;
+    }
+    $('map-panel').classList.toggle('stale-data', !(pg && pg.ok));
+  }
+
+  for (const b of document.querySelectorAll('.seg button')) {
+    b.setAttribute('aria-pressed', String(b.dataset.view === map.view));
+    b.addEventListener('click', () => {
+      map.view = b.dataset.view;
+      for (const x of document.querySelectorAll('.seg button')) x.setAttribute('aria-pressed', String(x === b));
+      try { localStorage.setItem('vq-map-view', map.view); } catch (e) { /* без хранилища */ }
+      if (last) renderMap(last);
+    });
+  }
+  new ResizeObserver(() => { if (last) renderMap(last); }).observe(map.wrap);
+
+  // --- опрос /api/state ---
+  let last = null;
+  function render(state) {
+    last = state;
+    renderHeader(state);
+    renderHealth(state);
+    renderMap(state);
+    renderQueues(state);
+    renderFeed(state);
+  }
+  async function poll() {
+    const started = performance.now();
+    let state = null;
+    try {
+      const res = await fetch('/api/state', { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      state = await res.json();
+      offlineSince = null;
+    } catch (e) {
+      if (!offlineSince) offlineSince = Date.now();
+      setBanner([]);
+    }
+    if (state) {
+      try {
+        render(state);
+      } catch (e) {
+        // Ошибка самой страницы, а не недоступность витрины: в консоль и в баннер, опрос продолжается.
+        console.error('render', e);
+        setBanner([`Ошибка отрисовки страницы: ${(e && e.message) || e}`]);
+      }
+    }
+    $('app').classList.toggle('dim', offlineSince !== null);
+    const every = document.hidden ? POLL_HIDDEN_MS : POLL_MS;
+    setTimeout(poll, Math.max(0, every - (performance.now() - started)));
+  }
+  poll();
+})();
+</script>
+</body>
+</html>
