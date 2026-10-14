@@ -9,6 +9,8 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import math
+import operator
 import os
 import re
 import shutil
@@ -31,10 +33,11 @@ from prometheus_client import CollectorRegistry, generate_latest
 
 from vq.core.decision import DECISION_TOPIC
 from vq.core.engine import QUEUE_TOPIC
-from vq.core.model import SiteState
+from vq.core.model import SiteState, event
 from vq.dispatcher.main import TELEMETRY_TOPIC
 from vq.dispatcher.metrics import DispatcherMetrics
 from vq.generator.main import FLUSH_TIMEOUT_S, DecisionFeed
+from vq.generator.metrics import GeneratorMetrics
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_SERVICES = ("dispatcher", "dispatcher-b", "generator", "viewer")
@@ -744,12 +747,239 @@ def test_dispatcher_counters_only_through_increase_or_rate(dashboard: dict[str, 
 
 
 def test_per_instance_gauges_follow_partition_owner(dashboard: dict[str, Any]) -> None:
-    """Замершие датчики standby, потерявшего партицию, не попадают на панели."""
-    owner = "and on(instance) (vq_epoch == scalar(max(vq_epoch)))"
+    """Замершие датчики standby, потерявшего партицию, и нули до claim (vq_epoch = 0) не попадают на панели."""
+    owner = "and on(instance) ((vq_epoch == scalar(max(vq_epoch))) > 0)"
     for title, expr in exprs(dashboard):
         for gauge in ("vq_queue_length", "vq_consumer_lag_messages", "vq_event_time_lag_seconds"):
             if gauge in expr:
                 assert owner in expr, (title, expr)
+
+
+# Датчик без меток prometheus_client отдаёт нулём с запуска /metrics, задолго до первого значения: у dispatcher —
+# до claim (standby — всё время, пока жив активный) и до первой пачки на пустом состоянии, у генератора — до первого
+# тика. Такой ноль — не данные: в окне перехвата (session.timeout.ms после остановки активного) панели пусты, а не
+# «сейчас» 1970-01-01, 57 лет с чекпоинта, лаг 0 и отставание 1,8·10⁹ с, растягивающее ось на весь период.
+# Панели считает Instant — подмножество PromQL; его ответы на этих сценариях сверены с promtool 3.15.0.
+
+PROMQL_TOKEN = re.compile(r"\d+(?:\.\d+)?|[A-Za-z_:][A-Za-z0-9_:]*|==|[-*(),>]")
+Labels = frozenset[tuple[str, str]]
+Vector = dict[Labels, float]
+STATE_GAUGES = {
+    "vq_event_time_seconds",
+    "vq_event_time_lag_seconds",
+    "vq_last_checkpoint_unixtime",
+    "vq_consumer_lag_messages",
+    "vq_queue_length",
+    "vq_gen_sim_time_seconds",
+}
+GAUGE_PANELS = (
+    "«Сейчас» по времени событий A",
+    "С последнего чекпоинта A",
+    "Длина очереди A",
+    "Лаг консьюмера, сообщений A",
+    "Отставание по времени событий, с A",
+    "Отставание по времени событий, с B",
+)
+EVENT_TS = 1_789_473_600  # «сейчас» последней пачки: 2026-09-15T12:00:00Z
+SCRAPED, QUERIED = EVENT_TS + 20.0, EVENT_TS + 30.0  # часы при опросе /metrics и при запросе панели
+
+
+def _no_name(labels: Labels) -> Labels:
+    return frozenset(p for p in labels if p[0] != "__name__")
+
+
+def _arith(lhs: float | Vector, rhs: float | Vector, op: Callable[[float, float], float]) -> float | Vector:
+    """Арифметика PromQL: имя метрики уходит, вектор с вектором — один к одному по остальным меткам."""
+    if isinstance(lhs, dict):
+        if isinstance(rhs, dict):
+            right = {_no_name(k): v for k, v in rhs.items()}
+            return {_no_name(k): op(v, right[_no_name(k)]) for k, v in lhs.items() if _no_name(k) in right}
+        return {_no_name(k): op(v, rhs) for k, v in lhs.items()}
+    if isinstance(rhs, dict):
+        return {_no_name(k): op(lhs, v) for k, v in rhs.items()}
+    return op(lhs, rhs)
+
+
+class Instant:
+    """Мгновенный запрос на подмножестве PromQL панелей с датчиками: метрика без меток, число, time(), scalar(),
+    max [by (…)], * и -, == и > без bool, and on (…). Как в Prometheus: сравнение с числом фильтрует вектор, max
+    пропускает NaN, scalar() не одного элемента — NaN. Пустой вектор — «No data» в Grafana."""
+
+    LEVELS = (("and",), ("==", ">"), ("-",), ("*",))  # приоритет растёт, как в PromQL
+
+    def __init__(self, series: Vector, now: float) -> None:
+        self.series, self.now = series, now
+        self.toks: list[str] = []
+
+    def __call__(self, expr: str) -> float | Vector:
+        self.toks = PROMQL_TOKEN.findall(expr)
+        assert "".join(self.toks) == "".join(expr.split()), f"вне подмножества: {expr}"
+        value = self.binary(0)
+        assert not self.toks, f"не разобрано {self.toks}: {expr}"
+        return value
+
+    def take(self, want: str | None = None) -> str:
+        tok = self.toks.pop(0)
+        assert want in (None, tok), f"ждали {want!r}, а не {tok!r}"
+        return tok
+
+    def labels(self) -> set[str]:
+        self.take("(")
+        names = set()
+        while (tok := self.take()) != ")":
+            if tok != ",":
+                names.add(tok)
+        return names
+
+    def vector(self) -> Vector:
+        """Аргумент функции в скобках."""
+        self.take("(")
+        value = self.binary(0)
+        self.take(")")
+        assert isinstance(value, dict)
+        return value
+
+    def binary(self, level: int) -> float | Vector:
+        if level == len(self.LEVELS):
+            return self.operand()
+        lhs = self.binary(level + 1)
+        while self.toks and self.toks[0] in self.LEVELS[level]:
+            op = self.take()
+            if op == "and":
+                self.take("on")
+                on = self.labels()
+                rhs = self.binary(level + 1)
+                assert isinstance(lhs, dict) and isinstance(rhs, dict)
+                keys = {frozenset(p for p in k if p[0] in on) for k in rhs}
+                lhs = {k: v for k, v in lhs.items() if frozenset(p for p in k if p[0] in on) in keys}
+            elif op in ("==", ">"):
+                rhs = self.binary(level + 1)
+                assert isinstance(lhs, dict) and isinstance(rhs, float)  # вектор с числом, без bool — фильтр
+                lhs = {k: v for k, v in lhs.items() if (v == rhs if op == "==" else v > rhs)}
+            else:
+                lhs = _arith(lhs, self.binary(level + 1), operator.sub if op == "-" else operator.mul)
+        return lhs
+
+    def operand(self) -> float | Vector:
+        tok = self.take()
+        if tok == "(":
+            value = self.binary(0)
+            self.take(")")
+            return value
+        if tok[0].isdigit():
+            return float(tok)
+        if tok == "time":
+            self.take("(")
+            self.take(")")
+            return self.now
+        if tok == "scalar":
+            arg = self.vector()
+            return next(iter(arg.values())) if len(arg) == 1 else math.nan
+        if tok == "max":
+            by: set[str] = set()
+            if self.toks[0] == "by":
+                self.take()
+                by = self.labels()
+            out: Vector = {}
+            for k, v in self.vector().items():
+                group = frozenset(p for p in k if p[0] in by)
+                if group not in out or math.isnan(out[group]) or v > out[group]:
+                    out[group] = v
+            return out
+        return {k: v for k, v in self.series.items() if ("__name__", tok) in k}
+
+
+def test_instant_query_subset() -> None:
+    a, b = frozenset({("__name__", "m"), ("instance", "a")}), frozenset({("__name__", "m"), ("instance", "b")})
+    q = Instant({a: 1.0, b: math.nan}, now=100.0)
+    assert q("max(m)") == {frozenset(): 1.0}  # NaN не побеждает
+    assert math.isnan(q("scalar(m)"))  # не один элемент
+    assert q("m > 0") == {a: 1.0}  # фильтр, метки на месте
+    assert q("time() - max(m > 5)") == {}  # пустой вектор в арифметике — пусто, «No data»
+    assert q("(m * 2) and on(instance) (m == scalar(max(m)))") == {_no_name(a): 2.0}
+    with pytest.raises(AssertionError, match="вне подмножества"):
+        q('m{instance="a"}')
+
+
+def scrape(registry: CollectorRegistry, job: str, instance: str) -> Vector:
+    """Серии одного /metrics, как их хранит Prometheus: с метками job и instance."""
+    return {
+        frozenset({**s.labels, "__name__": s.name, "job": job, "instance": instance}.items()): s.value
+        for family in registry.collect()
+        for s in family.samples
+    }
+
+
+def dispatcher_at(epoch: int | None, batch: bool = True) -> CollectorRegistry:
+    """Настоящие метрики dispatcher: до claim (epoch=None), после claim пустого состояния (batch=False — пачки ещё
+    не было) или после пачки: «сейчас» EVENT_TS, чекпоинт в SCRAPED, лаг 7, очередь S1 из двух машин."""
+    registry = CollectorRegistry()
+    metrics = DispatcherMetrics(registry=registry, clock=lambda: SCRAPED)
+    if epoch is not None:
+        metrics.on_claim(epoch, SiteState())
+        if batch:
+            metrics.observe_batch([event("queue_published", station="S1", length=2)], 0.01, 0.002, EVENT_TS)
+            metrics.observe_lag(7)
+    return registry
+
+
+def generator_at(sim_time: int | None) -> CollectorRegistry:
+    """Настоящие метрики генератора: до первого тика (None) или после тика с этим временем симуляции."""
+    registry = CollectorRegistry()
+    metrics = GeneratorMetrics(registry)
+    if sim_time is not None:
+        metrics.sync(
+            produced=1, faults={}, expected_drops=0, received=0, applied=0, ignored={}, delays=(), sim_time=sim_time
+        )
+    return registry
+
+
+def gauge_panels(dash: dict[str, Any], *scrapes: Vector) -> dict[str, list[float]]:
+    """Значения панелей с датчиками STATE_GAUGES в момент QUERIED; [] — «No data»."""
+    query = Instant({k: v for s in scrapes for k, v in s.items()}, QUERIED)
+    got = {}
+    for p in dash["panels"]:
+        for t in p.get("targets", []):
+            if STATE_GAUGES & set(PROMQL_TOKEN.findall(t["expr"])):
+                value = query(t["expr"])
+                assert isinstance(value, dict), t["expr"]
+                got[f"{p['title']} {t['refId']}"] = sorted(value.values())
+    return got
+
+
+def test_gauge_panels_are_empty_while_no_dispatcher_has_claimed(dashboard: dict[str, Any]) -> None:
+    """Окно перехвата: активный остановлен (его серии устарели), standby ещё не забрал партицию (vq_epoch = 0)."""
+    standby = scrape(dispatcher_at(None), "dispatcher", "dispatcher-b:9100")
+    generator = scrape(generator_at(EVENT_TS + 5), "generator", "generator:9101")
+    assert gauge_panels(dashboard, standby, generator) == {k: [] for k in GAUGE_PANELS}
+
+
+def test_gauge_panels_show_the_owner_and_skip_the_unclaimed_standby(dashboard: dict[str, Any]) -> None:
+    owner = scrape(dispatcher_at(3), "dispatcher", "dispatcher:9100")
+    standby = scrape(dispatcher_at(None), "dispatcher", "dispatcher-b:9100")
+    generator = scrape(generator_at(EVENT_TS + 5), "generator", "generator:9101")
+    assert gauge_panels(dashboard, owner, standby, generator) == {
+        "«Сейчас» по времени событий A": [EVENT_TS * 1000.0],
+        "С последнего чекпоинта A": [QUERIED - SCRAPED],
+        "Длина очереди A": [2.0],
+        "Лаг консьюмера, сообщений A": [7.0],
+        "Отставание по времени событий, с A": [SCRAPED - EVENT_TS],
+        "Отставание по времени событий, с B": [5.0],
+    }
+
+
+def test_generator_lag_is_empty_before_the_first_tick(dashboard: dict[str, Any]) -> None:
+    owner = scrape(dispatcher_at(3), "dispatcher", "dispatcher:9100")
+    unticked = scrape(generator_at(None), "generator", "generator:9101")
+    assert gauge_panels(dashboard, owner, unticked)["Отставание по времени событий, с B"] == []  # не −1,8·10⁹ с
+
+
+def test_now_and_checkpoint_are_empty_after_a_fresh_claim_before_the_first_batch(dashboard: dict[str, Any]) -> None:
+    fresh = scrape(dispatcher_at(1, batch=False), "dispatcher", "dispatcher:9100")
+    generator = scrape(generator_at(EVENT_TS + 5), "generator", "generator:9101")
+    got = gauge_panels(dashboard, fresh, generator)
+    now_panels = ("«Сейчас» по времени событий A", "С последнего чекпоинта A", "Отставание по времени событий, с B")
+    assert {k: got[k] for k in now_panels} == {k: [] for k in now_panels}
 
 
 def test_dashboard_structure(dashboard: dict[str, Any]) -> None:

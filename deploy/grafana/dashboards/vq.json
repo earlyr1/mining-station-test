@@ -347,7 +347,7 @@
             "uid": "prom"
           },
           "refId": "A",
-          "expr": "max(vq_event_time_seconds) * 1000",
+          "expr": "max(vq_event_time_seconds > 0) * 1000",
           "legendFormat": "",
           "range": true,
           "instant": false
@@ -420,7 +420,7 @@
             "uid": "prom"
           },
           "refId": "A",
-          "expr": "time() - max(vq_last_checkpoint_unixtime)",
+          "expr": "time() - max(vq_last_checkpoint_unixtime > 0)",
           "legendFormat": "",
           "range": true,
           "instant": false
@@ -1507,7 +1507,7 @@
             "uid": "prom"
           },
           "refId": "A",
-          "expr": "max by (station) ((vq_queue_length) and on(instance) (vq_epoch == scalar(max(vq_epoch))))",
+          "expr": "max by (station) ((vq_queue_length) and on(instance) ((vq_epoch == scalar(max(vq_epoch))) > 0))",
           "legendFormat": "{{station}}",
           "range": true,
           "instant": false
@@ -1822,7 +1822,7 @@
             "uid": "prom"
           },
           "refId": "A",
-          "expr": "max((vq_consumer_lag_messages) and on(instance) (vq_epoch == scalar(max(vq_epoch))))",
+          "expr": "max((vq_consumer_lag_messages) and on(instance) ((vq_epoch == scalar(max(vq_epoch))) > 0))",
           "legendFormat": "лаг",
           "range": true,
           "instant": false
@@ -1889,7 +1889,7 @@
             "uid": "prom"
           },
           "refId": "A",
-          "expr": "max((vq_event_time_lag_seconds) and on(instance) (vq_epoch == scalar(max(vq_epoch))))",
+          "expr": "max((vq_event_time_lag_seconds) and on(instance) ((vq_epoch == scalar(max(vq_epoch))) > 0))",
           "legendFormat": "часы − «сейчас»",
           "range": true,
           "instant": false
@@ -1900,7 +1900,7 @@
             "uid": "prom"
           },
           "refId": "B",
-          "expr": "max(vq_gen_sim_time_seconds) - max(vq_event_time_seconds)",
+          "expr": "max(vq_gen_sim_time_seconds > 0) - max(vq_event_time_seconds > 0)",
           "legendFormat": "генератор − dispatcher",
           "range": true,
           "instant": false

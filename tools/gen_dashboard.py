@@ -40,11 +40,22 @@ def instant(*items: tuple[str, str]) -> list[dict[str, Any]]:
 
 
 def owner(expr: str) -> str:
-    """Датчики только экземпляра dispatcher, владеющего партицией (наибольший vq_epoch).
+    """Датчики только экземпляра dispatcher, владеющего партицией (наибольший vq_epoch, больше 0).
 
-    У standby, потерявшего партицию, датчики замирают на старых значениях.
+    У standby, потерявшего партицию, датчики замирают на старых значениях; до claim (vq_epoch = 0) датчики — нули
+    с запуска /metrics, а не данные: в окне перехвата standby панель пуста.
     """
-    return f"({expr}) and on(instance) (vq_epoch == scalar(max(vq_epoch)))"
+    return f"({expr}) and on(instance) ((vq_epoch == scalar(max(vq_epoch))) > 0)"
+
+
+def max_known(metric: str) -> str:
+    """Наибольшее по экземплярам значение датчика без меток, без нулей.
+
+    prometheus_client отдаёт такой датчик нулём с запуска /metrics, пока значения нет: у dispatcher — до claim и до
+    первой пачки на пустом состоянии, у генератора — до первого тика. На панели этот ноль — 1970 год, 57 лет с
+    чекпоинта и скачок отставания на 1,8·10⁹ с, поэтому он не учитывается, и без значений панель пуста.
+    """
+    return f"max({metric} > 0)"
 
 
 def period(expr: str) -> str:
@@ -206,7 +217,7 @@ def build() -> dict[str, Any]:
             "«Сейчас» по времени событий",
             "vq_event_time_seconds — наибольший учтённый ts, UTC.",
             (11, 1, 5, 4),
-            targets(("max(vq_event_time_seconds) * 1000", "")),
+            targets((f"{max_known('vq_event_time_seconds')} * 1000", "")),
             unit="dateTimeAsIso",
         )
     )
@@ -215,7 +226,7 @@ def build() -> dict[str, Any]:
             "С последнего чекпоинта",
             "time() − vq_last_checkpoint_unixtime. Без входящих сообщений растёт — это нормально.",
             (16, 1, 4, 4),
-            targets(("time() - max(vq_last_checkpoint_unixtime)", "")),
+            targets((f"time() - {max_known('vq_last_checkpoint_unixtime')}", "")),
             unit="s",
             decimals=0,
             th=thresholds(("green", None), ("yellow", 10), ("red", 60)),
@@ -481,7 +492,10 @@ def build() -> dict[str, Any]:
             (16, 52, 8, 8),
             targets(
                 (f"max({owner('vq_event_time_lag_seconds')})", "часы − «сейчас»"),
-                ("max(vq_gen_sim_time_seconds) - max(vq_event_time_seconds)", "генератор − dispatcher"),
+                (
+                    f"{max_known('vq_gen_sim_time_seconds')} - {max_known('vq_event_time_seconds')}",
+                    "генератор − dispatcher",
+                ),
             ),
             unit="s",
         )
